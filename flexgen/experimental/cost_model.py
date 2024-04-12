@@ -35,10 +35,10 @@ import math
 import numpy as np
 import pulp
 
-from flexgen.compression import CompressionConfig
-from flexgen.opt_config import get_opt_config
-from flexgen.flex_opt import Policy
-from flexgen.utils import GB, T
+from ..compression import CompressionConfig
+from ..opt_config import get_opt_config
+from ..flex_opt import Policy
+from ..utils import GB, T
 
 alpha_g = 0.8
 alpha_c = 0.8
@@ -81,7 +81,9 @@ class CostModelConfig:
     c3: float = 0.0621
 
 
-def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent=None):
+def solve_lp(
+    config, bls, gbs, compress_w=False, verbose=1, debug=False, percent=None
+):
     assert bls > 0 and gbs > 0
     assert bls >= gbs and bls % gbs == 0
 
@@ -117,7 +119,7 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     c3 = config.c3
 
     ## Create Problem
-    prob = pulp.LpProblem('storage', sense=pulp.LpMinimize)
+    prob = pulp.LpProblem("storage", sense=pulp.LpMinimize)
 
     ## Create variables for cost
     T = pulp.LpVariable("T", lowBound=0)
@@ -144,14 +146,13 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     hc = pulp.LpVariable("hc", lowBound=0)
     hn = pulp.LpVariable("hn", lowBound=0)
 
-
     ## Set objective
 
     # Minimize T/bls
     prob += T * (1 / bls)
 
     # layer weight size
-    wi = 8 * h1 ** 2 + 4 * h1 * h2
+    wi = 8 * h1**2 + 4 * h1 * h2
     if compress_w:
         wi = wi / 4
 
@@ -179,14 +180,14 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     ## temporay hack, as the current runtime does not support hidden on disk
     prob += hg + hc == 1
 
-    prob += T == Tpre * l + Tgen * (n-1) * l
+    prob += T == Tpre * l + Tgen * (n - 1) * l
 
-#    # Tpre = max(ctogp, gtocp, dtocp, ctodp, compp)
-#    prob += Tpre >= ctogp
-#    prob += Tpre >= gtocp
-#    prob += Tpre >= dtocp
-#    prob += Tpre >= ctodp
-#    prob += Tpre >= compp
+    #    # Tpre = max(ctogp, gtocp, dtocp, ctodp, compp)
+    #    prob += Tpre >= ctogp
+    #    prob += Tpre >= gtocp
+    #    prob += Tpre >= dtocp
+    #    prob += Tpre >= ctodp
+    #    prob += Tpre >= compp
 
     # Tpre = max(ctogp + dtocp, gtocp + ctodp, compp)
     prob += Tpre >= ctogp + dtocp
@@ -194,23 +195,31 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     prob += Tpre >= compp
 
     # ctogp = (weight_ctogp + hidden_ctogp) / ctog_bdw
-    prob += ctogp == (1 / ctog_bdw) * (wi * (wc + wn)
-                     + 2 * s * h1 * bls * (hc + hn))
+    prob += ctogp == (1 / ctog_bdw) * (
+        wi * (wc + wn) + 2 * s * h1 * bls * (hc + hn)
+    )
 
     # gtocp = (cache_gtocp + hidden_gtocp) / gtoc_bdw
-    prob += gtocp == (1 / gtoc_bdw_cache) * (4 * (s + 1) * h1 * bls * (cc + cn)) \
-                   + (1 / gtoc_bdw_hidden) * 2 * s * h1 * bls * (hc + hn)
+    prob += gtocp == (1 / gtoc_bdw_cache) * (
+        4 * (s + 1) * h1 * bls * (cc + cn)
+    ) + (1 / gtoc_bdw_hidden) * 2 * s * h1 * bls * (hc + hn)
 
     # dtocp = (weight_dtocp + hidden_dtocp) / dtoc_bdw
     prob += dtocp == (1 / dtoc_bdw) * (wi * wn + 2 * s * h1 * bls * hn)
 
     # ctodp = (cache_ctodp + hidden_ctodp) / ctod_bdw
-    prob += ctodp == (1 / ctod_bdw_cache_p) * 4 * bls * (s + 1) * h1 * cn \
-                   + (1 / ctod_bdw_hidden_p) * 2 * s * h1 * bls * hn
+    prob += (
+        ctodp
+        == (1 / ctod_bdw_cache_p) * 4 * bls * (s + 1) * h1 * cn
+        + (1 / ctod_bdw_hidden_p) * 2 * s * h1 * bls * hn
+    )
 
     # compp = gpu_compp
-    prob += compp == (1 / mm_flops_p) * bls * (8 * s * h1 ** 2  + 4 * s * h1 * h2) \
-                     + (1 / bmm_flops_p) * 4 * bls * s ** 2 * h1
+    prob += (
+        compp
+        == (1 / mm_flops_p) * bls * (8 * s * h1**2 + 4 * s * h1 * h2)
+        + (1 / bmm_flops_p) * 4 * bls * s**2 * h1
+    )
 
     # # Tgen = max(ctogg, gtocg, dtocg, ctodg, compg)
     # prob += Tgen >= ctogg
@@ -226,30 +235,40 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     prob += Tgen >= compg + ctogg
 
     # ctogg = (weight_ctogg + hidden_ctogg) / ctog_bdw
-    prob += ctogg == (1 / ctog_bdw) * (wi * (wc + wn)
-                     + 2 * h1 * bls * (hc + hn))
+    prob += ctogg == (1 / ctog_bdw) * (
+        wi * (wc + wn) + 2 * h1 * bls * (hc + hn)
+    )
 
     # gtocg = hidden_gtocg / gtoc_bdw
     prob += gtocg == (1 / gtoc_bdw_hidden) * 2 * h1 * bls * (hc + hn)
 
     # dtocg = (cache_dtocg + weight_dtocg + hidden_dtocg) / dtoc_bdw
-    prob += dtocg == (1 / dtoc_bdw) * (4 * bls * (s + n / 2) * h1 * cn
-                                       + 2 * h1 * bls * hn) \
-                     + (1 / (dtoc_bdw * 0.95)) * wi * wn 
+    prob += (
+        dtocg
+        == (1 / dtoc_bdw)
+        * (4 * bls * (s + n / 2) * h1 * cn + 2 * h1 * bls * hn)
+        + (1 / (dtoc_bdw * 0.95)) * wi * wn
+    )
 
     # ctodg = (cache_ctodg + hidden_ctodg) / ctod_bdw
-    prob += ctodg == (1 / ctod_bdw_g) * (4 * bls * h1 * cn
-                     + 2 * h1 * bls * hn)
+    prob += ctodg == (1 / ctod_bdw_g) * (4 * bls * h1 * cn + 2 * h1 * bls * hn)
 
     # compg = gpu_compg + cpu_compg
     # non-linear cpu_flops
-    cpu_flops_real = cpu_flops * np.maximum(0.1,
-            1 + c1 * (max(0, math.log2(64 / gbs)) * max(0, math.log2(4096 / h1)))
-            - c2 * max(0, math.log2(64 / gbs))
-            - c3 * max(0, math.log2(4096 / h1)))
-    prob += compg == (1 / mm_flops_g) * bls * (8 * h1 ** 2  + 4 * h1 * h2) \
-                     + (1 / bmm_flops_g) * 4 * bls * (s + n / 2) * h1 * cg \
-                     + (1 / cpu_flops_real) * 4 * bls * (s + n / 2) * h1 * (cc + cn)
+    cpu_flops_real = cpu_flops * np.maximum(
+        0.1,
+        1
+        + c1 * (max(0, math.log2(64 / gbs)) * max(0, math.log2(4096 / h1)))
+        - c2 * max(0, math.log2(64 / gbs))
+        - c3 * max(0, math.log2(4096 / h1)),
+    )
+    prob += compg == (1 / mm_flops_g) * bls * (8 * h1**2 + 4 * h1 * h2) + (
+        1 / bmm_flops_g
+    ) * 4 * bls * (s + n / 2) * h1 * cg + (1 / cpu_flops_real) * 4 * bls * (
+        s + n / 2
+    ) * h1 * (
+        cc + cn
+    )
 
     ## Create variables for peak memory constraints
     gpu_home_p = pulp.LpVariable("gpu_home^p", lowBound=0)
@@ -279,17 +298,24 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     cpu_w_g = pulp.LpVariable("cpu_w^g", lowBound=0)
 
     nvme_peak = pulp.LpVariable("nvme_peak", lowBound=0)
-    
+
     ## GPU peak memory constaints
-    prob += gpu_home_p == wi * l * wg + 2 * s * h1 * bls * hg + 4 * (s + n) * h1 * bls * l * cg
-    prob += interp == 8 * gbs * s * h1 \
-                    + gbs * (2 * s * h1 + 2 * nh * s ** 2) \
-                    + gbs * (2 * s * h1) \
-                    + 4 * gbs * s * h1 \
-                    + 2 * gbs * s * h2 \
-                    + 2 * gbs * s * h1
-    prob += gpu_w_p == 2 * wi * (1 - wg) + 2 * s * h1 * gbs * (1 - hg) \
-                     + interp
+    prob += (
+        gpu_home_p
+        == wi * l * wg
+        + 2 * s * h1 * bls * hg
+        + 4 * (s + n) * h1 * bls * l * cg
+    )
+    prob += (
+        interp
+        == 8 * gbs * s * h1
+        + gbs * (2 * s * h1 + 2 * nh * s**2)
+        + gbs * (2 * s * h1)
+        + 4 * gbs * s * h1
+        + 2 * gbs * s * h2
+        + 2 * gbs * s * h1
+    )
+    prob += gpu_w_p == 2 * wi * (1 - wg) + 2 * s * h1 * gbs * (1 - hg) + interp
     # prob += (gpu_home_p * 1.2 + gpu_w_p) + 0.5 * GB <= gmem
     prob += gpu_home_p + gpu_w_p <= gmem
 
@@ -309,16 +335,26 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     # prob += mlp2p == 2 * gbs * s * (h2 + h1)
     # prob += gpu_home_p + gpu_w_p <= gmem
 
-    prob += gpu_home_g == wi * l * wg + 2 * h1 * bls * hg + 4 * (s + n) * h1 * bls * l * cg
-    prob += interg == 8 * gbs * h1 \
-                    + gbs * (2 * h1 + 2 * (s + n) * h1 + 2 * nh * (s + n)) * cg \
-                    + gbs * (2 * (s + n) * h1 + 2 * h1) * cg \
-                    + 4 * gbs * h1 \
-                    + 2 * gbs * h2 \
-                    + 2 * gbs * h1
-    prob += gpu_w_g == 2 * wi * (1 - wg) + 2 * h1 * gbs * (1 - hg) \
-                     + 2 * 2 * gbs * (s + n) * h1 * cg \
-                     + interg
+    prob += (
+        gpu_home_g
+        == wi * l * wg + 2 * h1 * bls * hg + 4 * (s + n) * h1 * bls * l * cg
+    )
+    prob += (
+        interg
+        == 8 * gbs * h1
+        + gbs * (2 * h1 + 2 * (s + n) * h1 + 2 * nh * (s + n)) * cg
+        + gbs * (2 * (s + n) * h1 + 2 * h1) * cg
+        + 4 * gbs * h1
+        + 2 * gbs * h2
+        + 2 * gbs * h1
+    )
+    prob += (
+        gpu_w_g
+        == 2 * wi * (1 - wg)
+        + 2 * h1 * gbs * (1 - hg)
+        + 2 * 2 * gbs * (s + n) * h1 * cg
+        + interg
+    )
     # prob += (gpu_home_g * 1.2 + gpu_w_g) + 0.5 * GB <= gmem
     prob += gpu_home_g + gpu_w_g <= gmem
 
@@ -339,16 +375,34 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
     # prob += gpu_home_g + gpu_w_g <= gmem
 
     ## CPU peak memory constraints
-    prob += cpu_home_p == wi * l * wc + 2 * s * h1 * bls * hc + 4 * s * h1 * bls * l * cc
+    prob += (
+        cpu_home_p
+        == wi * l * wc + 2 * s * h1 * bls * hc + 4 * s * h1 * bls * l * cc
+    )
     prob += cpu_w_p == wi * (1 - wg) + 2 * s * h1 * gbs * (1 - hg)
     prob += cpu_home_p + cpu_w_p <= cmem
 
-    prob += cpu_home_g == wi * l * wc + 2 * h1 * bls * hc + 4 * (s + n) * h1 * bls * l * cc
-    prob += cpu_w_g == wi * wn + 4 * h1 * gbs * hn + 8 * (s + n) * h1 * gbs * cn + 2 * nh * (s + n) * gbs + 2 * h1 * gbs
+    prob += (
+        cpu_home_g
+        == wi * l * wc + 2 * h1 * bls * hc + 4 * (s + n) * h1 * bls * l * cc
+    )
+    prob += (
+        cpu_w_g
+        == wi * wn
+        + 4 * h1 * gbs * hn
+        + 8 * (s + n) * h1 * gbs * cn
+        + 2 * nh * (s + n) * gbs
+        + 2 * h1 * gbs
+    )
     prob += cpu_home_g + cpu_w_g <= cmem
 
     ## NVMe peak memory constraints
-    prob += nvme_peak == wi * l * wn + 2 * s * h1 * bls * hn + 4 * (s + n) * h1 * bls  * l * cn
+    prob += (
+        nvme_peak
+        == wi * l * wn
+        + 2 * s * h1 * bls * hn
+        + 4 * (s + n) * h1 * bls * l * cn
+    )
     prob += nvme_peak <= nmem
 
     # ------------ Finish add constraints ---------------
@@ -367,87 +421,144 @@ def solve_lp(config, bls, gbs, compress_w=False, verbose=1, debug=False, percent
 
     cpu_peak_p = pulp.value(cpu_home_p) + pulp.value(cpu_w_p)
     cpu_peak_g = pulp.value(cpu_home_g) + pulp.value(cpu_w_g)
- 
+
     throughput = bls * n / pulp.value(T)
 
     tpre = pulp.value(Tpre)
     tpre_tot = tpre * l
 
     tgen = pulp.value(Tgen)
-    tgen_tot = tgen * (n-1) * l
+    tgen_tot = tgen * (n - 1) * l
 
     ## print solution
     if verbose:
         print(f"status: {status}")
         print(f"weights size: {wi * l / GB:.4f} GB")
-        print(f"ctogp = {pulp.value(ctogp):.4f} s  "
-              f"gtocp = {pulp.value(gtocp):.4f} s  "
-              f"dtocp = {pulp.value(dtocp):.4f} s  "
-              f"ctodp = {pulp.value(ctodp):.4f} s  "
-              f"compp = {pulp.value(compp):.4f} s")
+        print(
+            f"ctogp = {pulp.value(ctogp):.4f} s  "
+            f"gtocp = {pulp.value(gtocp):.4f} s  "
+            f"dtocp = {pulp.value(dtocp):.4f} s  "
+            f"ctodp = {pulp.value(ctodp):.4f} s  "
+            f"compp = {pulp.value(compp):.4f} s"
+        )
         print(f"Tpre = {pulp.value(Tpre):.3f} s")
         print(f"Tpre * l: {tpre:.4f} * {l} = {tpre_tot:.4f}")
-        print(f"ctogg = {pulp.value(ctogg):.4f} s  "
-              f"gtocg = {pulp.value(gtocg):.4f} s  "
-              f"dtocg = {pulp.value(dtocg):.4f} s  "
-              f"ctodg = {pulp.value(ctodg):.4f} s  "
-              f"compg = {pulp.value(compg):.4f} s")
-        print(f"cache dtocg: {4 * bls * (s + n / 2) * h1 * pulp.value(cn) / dtoc_bdw:.2f}  "
-              f"weights dtocg: {wi * pulp.value(wn) / dtoc_bdw:.2f}")
+        print(
+            f"ctogg = {pulp.value(ctogg):.4f} s  "
+            f"gtocg = {pulp.value(gtocg):.4f} s  "
+            f"dtocg = {pulp.value(dtocg):.4f} s  "
+            f"ctodg = {pulp.value(ctodg):.4f} s  "
+            f"compg = {pulp.value(compg):.4f} s"
+        )
+        print(
+            f"cache dtocg: {4 * bls * (s + n / 2) * h1 * pulp.value(cn) / dtoc_bdw:.2f}  "
+            f"weights dtocg: {wi * pulp.value(wn) / dtoc_bdw:.2f}"
+        )
         print(f"Tgen = {pulp.value(Tgen):.3f} s")
-        print(f"Tgen * (n-1) * l: "
-                f"{tgen:.4f} * {n-1} * {l} = {tgen_tot:.4f}")
+        print(
+            f"Tgen * (n-1) * l: " f"{tgen:.4f} * {n-1} * {l} = {tgen_tot:.4f}"
+        )
 
-        print(f"gpu peak mem (prefill): {gpu_peak_p / GB:.3f} GB / {gmem / alpha_g / GB:.3f} GB")
-        print(f"gpu peak mem (gen):     {gpu_peak_g / GB:.3f} GB / {gmem / alpha_g / GB:.3f} GB")
+        print(
+            f"gpu peak mem (prefill): {gpu_peak_p / GB:.3f} GB / {gmem / alpha_g / GB:.3f} GB"
+        )
+        print(
+            f"gpu peak mem (gen):     {gpu_peak_g / GB:.3f} GB / {gmem / alpha_g / GB:.3f} GB"
+        )
 
-        print(f"cpu peak mem (prefill): {cpu_peak_p / GB:.3f} GB / {cmem / alpha_c / GB:.3f} GB")
-        print(f"cpu peak mem (gen):     {cpu_peak_g / GB:.3f} GB / {cmem / alpha_c / GB:.3f} GB")
+        print(
+            f"cpu peak mem (prefill): {cpu_peak_p / GB:.3f} GB / {cmem / alpha_c / GB:.3f} GB"
+        )
+        print(
+            f"cpu peak mem (gen):     {cpu_peak_g / GB:.3f} GB / {cmem / alpha_c / GB:.3f} GB"
+        )
         print(f"cpu_home_g: {pulp.value(cpu_home_g) / GB:.2f} GB")
         print(f"cpu_w_g: {pulp.value(cpu_w_g) / GB:.2f} GB")
 
-        print(f"nvme peak mem:          {pulp.value(nvme_peak) / GB:.3f} GB / {nmem / alpha_n / GB:.3f} GB")
+        print(
+            f"nvme peak mem:          {pulp.value(nvme_peak) / GB:.3f} GB / {nmem / alpha_n / GB:.3f} GB"
+        )
 
-        print(f"wg = {pulp.value(wg):.2f}  "
-              f"wc = {pulp.value(wc):.2f}  "
-              f"wn = {pulp.value(wn):.2f}")
-        print(f"cg = {pulp.value(cg):.2f}  "
-              f"cc = {pulp.value(cc):.2f}  "
-              f"cn = {pulp.value(cn):.2f}")
-        print(f"hg = {pulp.value(hg):.2f}  "
-              f"hc = {pulp.value(hc):.2f}  "
-              f"hn = {pulp.value(hn):.2f}")
-        print(f"T = {pulp.value(T)} s  "
-              f"generated = {bls * n} tokens")
+        print(
+            f"wg = {pulp.value(wg):.2f}  "
+            f"wc = {pulp.value(wc):.2f}  "
+            f"wn = {pulp.value(wn):.2f}"
+        )
+        print(
+            f"cg = {pulp.value(cg):.2f}  "
+            f"cc = {pulp.value(cc):.2f}  "
+            f"cn = {pulp.value(cn):.2f}"
+        )
+        print(
+            f"hg = {pulp.value(hg):.2f}  "
+            f"hc = {pulp.value(hc):.2f}  "
+            f"hn = {pulp.value(hn):.2f}"
+        )
+        print(f"T = {pulp.value(T)} s  " f"generated = {bls * n} tokens")
         print(f"throughput = {throughput:.2f} token/s")
-    
-    policy = Policy(gbs, bls // gbs,
-                    pulp.value(wg), pulp.value(wc),
-                    pulp.value(cg), pulp.value(cc),
-                    pulp.value(hg), pulp.value(hc),
-                    overlap=True, sep_layer=False, pin_weight=False,
-                    cpu_cache_compute=True, attn_sparsity=1,
-                    compress_weight=False, comp_weight_config=
-                        CompressionConfig(num_bits=4, group_size=64,
-                                          group_dim=0, symmetric=False),
-                    compress_cache=False, comp_cache_config=
-                        CompressionConfig(num_bits=4, group_size=64,
-                                          group_dim=2, symmetric=False))
-    return status, policy, (throughput, tpre_tot, tgen_tot), (gpu_peak_p, gpu_peak_g)
+
+    policy = Policy(
+        gbs,
+        bls // gbs,
+        pulp.value(wg),
+        pulp.value(wc),
+        pulp.value(cg),
+        pulp.value(cc),
+        pulp.value(hg),
+        pulp.value(hc),
+        overlap=True,
+        sep_layer=False,
+        pin_weight=False,
+        cpu_cache_compute=True,
+        attn_sparsity=1,
+        compress_weight=False,
+        comp_weight_config=CompressionConfig(
+            num_bits=4, group_size=64, group_dim=0, symmetric=False
+        ),
+        compress_cache=False,
+        comp_cache_config=CompressionConfig(
+            num_bits=4, group_size=64, group_dim=2, symmetric=False
+        ),
+    )
+    return (
+        status,
+        policy,
+        (throughput, tpre_tot, tgen_tot),
+        (gpu_peak_p, gpu_peak_g),
+    )
 
 
-def get_nb_ub(config, gbs, solve_lp, compress_w=False, debug=None, percent=None):
+def get_nb_ub(
+    config, gbs, solve_lp, compress_w=False, debug=None, percent=None
+):
     nb = 1
     while True:
-        status, _, _, _ = solve_lp(config, gbs * nb, gbs, compress_w=compress_w, verbose=0, debug=debug, percent=percent)
-        if status == -1: break
+        status, _, _, _ = solve_lp(
+            config,
+            gbs * nb,
+            gbs,
+            compress_w=compress_w,
+            verbose=0,
+            debug=debug,
+            percent=percent,
+        )
+        if status == -1:
+            break
         nb *= 2
 
     left = max(nb // 2, 1)
     right = nb
     while left < right:
         mid = (left + right) // 2
-        status, _, _, _ = solve_lp(config, gbs * mid, gbs, compress_w=compress_w, verbose=0, debug=debug, percent=percent)
+        status, _, _, _ = solve_lp(
+            config,
+            gbs * mid,
+            gbs,
+            compress_w=compress_w,
+            verbose=0,
+            debug=debug,
+            percent=percent,
+        )
         if status == 1:
             left = mid + 1
         elif status == -1:
@@ -482,11 +593,23 @@ def solve(config, solve_lp, args):
     # print(["{0:0.2f}".format(x[0]) for x in throughputs])
 
     debug = False
-    if args["wg"] or args["wc"] or args["cg"] or \
-       args["cc"] or args["hg"] or args["hc"]:
+    if (
+        args["wg"]
+        or args["wc"]
+        or args["cg"]
+        or args["cc"]
+        or args["hg"]
+        or args["hc"]
+    ):
         debug = True
-    percent = [args["wg"], args["wc"], args["cg"], args["cc"],
-               args["hg"], args["hc"]]
+    percent = [
+        args["wg"],
+        args["wc"],
+        args["cg"],
+        args["cc"],
+        args["hg"],
+        args["hc"],
+    ]
     if args["percent"] is not None:
         debug = True
         percent = args["percent"]
@@ -500,22 +623,49 @@ def solve(config, solve_lp, args):
             gbs = args["gbs"]
         if args["num_gb"] is not None:
             status, policy, (throughput, _, _), _ = solve_lp(
-                config, gbs * args["num_gb"], gbs, compress_w=compress_w, verbose=0, debug=debug, percent=percent)
+                config,
+                gbs * args["num_gb"],
+                gbs,
+                compress_w=compress_w,
+                verbose=0,
+                debug=debug,
+                percent=percent,
+            )
             if status == -1:
                 break
             if status == 1:
-                best_policy, max_throughput = best(best_policy, max_throughput, policy, throughput)
+                best_policy, max_throughput = best(
+                    best_policy, max_throughput, policy, throughput
+                )
         else:
-            nb_ub = get_nb_ub(config, gbs, solve_lp, compress_w=compress_w, debug=debug, percent=percent)
-            if nb_ub == 0: break
+            nb_ub = get_nb_ub(
+                config,
+                gbs,
+                solve_lp,
+                compress_w=compress_w,
+                debug=debug,
+                percent=percent,
+            )
+            if nb_ub == 0:
+                break
 
             prev_throughput = 0
             for nb in range(1, nb_ub + 1):
-                _, policy, (throughput, _, _), _ = solve_lp(config, gbs * nb, gbs, compress_w=compress_w, verbose=0, debug=debug, percent=percent)
+                _, policy, (throughput, _, _), _ = solve_lp(
+                    config,
+                    gbs * nb,
+                    gbs,
+                    compress_w=compress_w,
+                    verbose=0,
+                    debug=debug,
+                    percent=percent,
+                )
                 if throughput < prev_throughput:
                     break
                 prev_throughput = throughput
-                best_policy, max_throughput = best(best_policy, max_throughput, policy, throughput)
+                best_policy, max_throughput = best(
+                    best_policy, max_throughput, policy, throughput
+                )
         if args["gbs"] is not None:
             break
         if gbs < 4:
@@ -524,8 +674,15 @@ def solve(config, solve_lp, args):
             gbs *= 2
 
     if best_policy is not None:
-        _, _, _, _ = solve_lp(config, best_policy.gpu_batch_size * best_policy.num_gpu_batches,
-                           best_policy.gpu_batch_size, compress_w=compress_w, verbose=True, debug=debug, percent=percent)
+        _, _, _, _ = solve_lp(
+            config,
+            best_policy.gpu_batch_size * best_policy.num_gpu_batches,
+            best_policy.gpu_batch_size,
+            compress_w=compress_w,
+            verbose=True,
+            debug=debug,
+            percent=percent,
+        )
     return best_policy, max_throughput
 
 
@@ -537,7 +694,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu-mem", type=int, default=15)
     parser.add_argument("--cpu-mem", type=int, default=200)
     parser.add_argument("--nvme-mem", type=int, default=1500)
-    
+
     parser.add_argument("--gbs", "--gpu-batch-size", type=int)
     parser.add_argument("--num-gb", "--num-gpu-batches", type=int)
     parser.add_argument("--percent", nargs="+", type=int)
@@ -553,7 +710,10 @@ if __name__ == "__main__":
     parser.add_argument("--alpha-c", type=float)
     parser.add_argument("--alpha-n", type=float)
     args = parser.parse_args()
-    assert not (args.percent and (args.wg or args.wc or args.cg or args.cc or args.hg or args.hc))
+    assert not (
+        args.percent
+        and (args.wg or args.wc or args.cg or args.cc or args.hg or args.hc)
+    )
 
     if args.alpha_g:
         alpha_g = args.alpha_g
@@ -580,4 +740,3 @@ if __name__ == "__main__":
     best_policy, max_throughput = solve(config, solve_lp, vars(args))
     print(best_policy)
     print(f"max_throughput: {max_throughput:.2f} token/s")
- 

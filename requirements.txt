@@ -1,0 +1,6 @@
+dataclasses
+pulp
+numpy
+attrs
+tqdm
+transformers
