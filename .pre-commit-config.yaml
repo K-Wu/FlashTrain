@@ -1,0 +1,19 @@
+repos:
+- repo: https://gitlab.com/daverona/pre-commit/cpp
+  rev: 0.8.0               # use the most recent version
+  hooks:
+  - id: clang-format
+- repo: https://github.com/psf/black
+  rev: 23.3.0
+  hooks:
+    - id: black
+      # It is recommended to specify the latest version of Python
+      # supported by your project here, or alternatively use
+      # pre-commit's default_language_version, see
+      # https://pre-commit.com/#top_level-default_language_version
+      language_version: python3
+      args: [--line-length=79, --experimental-string-processing]
+- repo: https://github.com/cheshirekow/cmake-format-precommit
+  rev: v0.6.10
+  hooks:
+  - id: cmake-format
