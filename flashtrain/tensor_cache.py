@@ -3,15 +3,17 @@ We use saved tensor hooks to store the activations in TensorCache.
 Reference:
 https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html#:~:text=Saving%20tensors%20to%20disk
 """
+
 import torch
 import os
 import socket
 from typing import Callable
 import weakref
 import concurrent.futures
+from .utils import TensorEqID
 
 
-def get_identifier() -> str:
+def get_process_descriptor() -> str:
     if torch.distributed.is_initialized():
         return f"{socket.gethostname()}_rank{torch.distributed.get_rank()}"
     else:
@@ -44,10 +46,10 @@ def save_tensor(tensor: torch.Tensor, path: str):
 def async_save_tensor(
     tensor: torch.Tensor,
     path: str,
-    tensor_being_stored: dict[int, concurrent.futures.Future],
+    tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
 ):
     torch.save(tensor, path)
-    del tensor_being_stored[id(tensor)]
+    del tensor_being_stored[TensorEqID.from_tensor(tensor)]
 
 
 def load_tensor(path: str):
@@ -59,9 +61,9 @@ def load_tensor(path: str):
 
 def async_load_tensor(
     path: str,
-    tensor_id_to_loaded_tensor: dict[int, torch.Tensor],
-    tensor_id: int,
-    tensor_being_loaded: dict[int, concurrent.futures.Future],
+    tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
+    tensor_id: TensorEqID,
+    tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
 ):
     """
     Load the tensor from the file.
@@ -77,8 +79,8 @@ def del_dict_key_if_exists(d: dict, key):
 
 class TensorCache:
     # We store the id of module to avoid affecting the garbage collection of module.
-    module_id_to_tensor_ids: dict[int, set[int]]
-    tensor_id_to_module_ids: dict[int, set[int]]
+    module_id_to_tensor_ids: dict[int, set[TensorEqID]]
+    tensor_id_to_module_ids: dict[TensorEqID, set[int]]
 
     module_id_to_module: dict[int, weakref.ref[torch.nn.Module]]
     forward_module_scope_stack: list[int]
@@ -86,15 +88,15 @@ class TensorCache:
     backward_done_modules_with_cache_uncleared: set[int]
 
     # In forward propagation, weak ref to tensor are dictionary values to allow the tensor to be garbage collected.
-    tensor_id_to_tensor_to_store: dict[int, weakref.ref[torch.Tensor]]
-    tensor_id_to_filename: dict[int, str]
+    tensor_id_to_tensor_to_store: dict[TensorEqID, weakref.ref[torch.Tensor]]
+    tensor_id_to_filename: dict[TensorEqID, str]
 
     # In backward propagation, tensors are loaded as values in the dictionary to allow multiple reference.
-    tensor_id_to_loaded_tensor: dict[int, torch.Tensor]
+    tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor]
 
     executor: concurrent.futures.ThreadPoolExecutor
-    tensor_being_stored: dict[int, concurrent.futures.Future]
-    tensor_being_loaded: dict[int, concurrent.futures.Future]
+    tensor_being_stored: dict[TensorEqID, concurrent.futures.Future]
+    tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future]
 
     def __init__(self):
         self.module_id_to_tensor_ids = {}
@@ -149,15 +151,15 @@ class TensorCache:
         return full_backward_hook
 
     # Reference: https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
-    def get_pack_hook(self) -> Callable[..., int]:
-        def pack_hook(tensor: torch.Tensor) -> int:
+    def get_pack_hook(self) -> Callable[..., TensorEqID]:
+        def pack_hook(tensor: torch.Tensor) -> TensorEqID:
             """
             Register the tensors that are saved for backward in the forward pass.
             """
-            tensor_id = id(tensor)
+            tensor_id = TensorEqID.from_tensor(tensor)
             if tensor_id not in self.tensor_id_to_tensor_to_store:
                 self.tensor_id_to_filename[tensor_id] = get_filename(
-                    get_identifier(), tensor
+                    get_process_descriptor(), tensor
                 )
                 self.tensor_being_stored[tensor_id] = self.executor.submit(
                     async_save_tensor,
@@ -181,7 +183,7 @@ class TensorCache:
         return pack_hook
 
     def get_unpack_hook(self) -> Callable[..., torch.Tensor]:
-        def unpack_hook(tensor_id: int) -> torch.Tensor:
+        def unpack_hook(tensor_id: TensorEqID) -> torch.Tensor:
             if not tensor_id in self.tensor_id_to_loaded_tensor:
                 self.tensor_id_to_loaded_tensor[tensor_id] = load_tensor(
                     self.tensor_id_to_filename[tensor_id]

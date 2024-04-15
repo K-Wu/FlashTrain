@@ -4,3 +4,4 @@ numpy
 attrs
 tqdm
 transformers
+recordclass
