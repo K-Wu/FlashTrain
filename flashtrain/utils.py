@@ -6,6 +6,20 @@ import weakref
 import concurrent.futures
 
 
+def is_tensor_equal(x: torch.Tensor, y: torch.Tensor) -> bool:
+    """
+    When the tensors are packed to computation graph, identical tensors may be wrapped by different Tensor objects to avoid cyclic reference. This function serves to determine if the underlying tensors are identical.
+    """
+    if x.untyped_storage().data_ptr() != y.untyped_storage().data_ptr():
+        return False
+    if x.untyped_storage().size() != y.untyped_storage().size():
+        return False
+    if x.stride() != y.stride():
+        return False
+
+    return True
+
+
 def get_identifier() -> str:
     if torch.distributed.is_initialized():
         return f"{socket.gethostname()}_rank{torch.distributed.get_rank()}"
@@ -87,6 +101,10 @@ class TensorCache:
         self.tensor_not_stored_yet = {}
         self.tensor_not_loaded_yet = {}
 
+    def __del__(self):
+        # This function is only triggered when the reference count of the object is zero. In this case, we need to shutdown the executor.
+        self.executor.shutdown()
+
     def notify_forward(
         self,
         ctx: torch.autograd.function.FunctionCtx,
@@ -151,13 +169,13 @@ class TensorCache:
                 if tensor is not None:
                     self.tensor_id_to_loaded_tensor[tensor_id] = tensor
                 else:
-                    self.tensor_not_loaded_yet[tensor_id] = (
-                        self.executor.submit(
-                            prefetch_tensor,
-                            self.tensor_id_to_filename[tensor_id],
-                            self.tensor_id_to_loaded_tensor,
-                            tensor_id,
-                        )
+                    self.tensor_not_loaded_yet[
+                        tensor_id
+                    ] = self.executor.submit(
+                        prefetch_tensor,
+                        self.tensor_id_to_filename[tensor_id],
+                        self.tensor_id_to_loaded_tensor,
+                        tensor_id,
                     )
         raise NotImplementedError
 
