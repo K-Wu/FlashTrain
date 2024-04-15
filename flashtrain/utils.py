@@ -1,4 +1,5 @@
 import torch
+import os
 
 
 # TODO: Deduplicate file IO when is_tensor_equal is True
@@ -19,3 +20,13 @@ def is_tensor_equal(x: torch.Tensor, y: torch.Tensor) -> bool:
 def oneline_print(*args):
     reprs = [str(arg).replace("\n", "↵") for arg in args]
     print(*reprs, flush=True)
+
+
+# TODO: Use SelfDeletingTempFile instead of plain str in tensor_cache's tensor_id_to_filename
+class SelfDeletingTempFile:
+    # From https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
+    def __init__(self, path: str):
+        self.path = path
+
+    def __del__(self):
+        os.remove(self.path)
