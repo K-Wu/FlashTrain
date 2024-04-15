@@ -27,10 +27,10 @@ def _unpad(shard: torch.Tensor, pad: int) -> torch.Tensor:
 
 
 def consolidate_shard_weights(
-        shard_weights: List[Dict[str, torch.Tensor]],
-        shard_metadata: List[Dict[str, Any]],
-        with_module_buffers: bool = True,
-        strict: bool = True,
+    shard_weights: List[Dict[str, torch.Tensor]],
+    shard_metadata: List[Dict[str, Any]],
+    with_module_buffers: bool = True,
+    strict: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """
     Given a list of weights and meta data associated to N shards, reconstruct
@@ -58,25 +58,35 @@ def consolidate_shard_weights(
             allow incomplete shard weights. if True, every key in the metadata must be present in the weights.
     """
     if len(shard_weights) != len(shard_metadata) or not len(shard_weights):
-        raise ValueError("Require metadata for each shard and non-empty shards")
+        raise ValueError(
+            "Require metadata for each shard and non-empty shards"
+        )
 
     consolidated_weights = {}
     original_world_size = len(shard_weights)
 
     # For every FSDP instance.
-    for fsdp_obj_idx, metadata in enumerate(shard_metadata[0]["param_metadata"]):
+    for fsdp_obj_idx, metadata in enumerate(
+        shard_metadata[0]["param_metadata"]
+    ):
         fsdp_path = metadata["fsdp_path"]
         params = metadata["params"]
         # For every this-FSDP-owned param, flattened or not.
         for backing_param_name, v in params.items():
-            in_state_dict_key = ".".join([fsdp_path, backing_param_name]) if fsdp_path else backing_param_name
+            in_state_dict_key = (
+                ".".join([fsdp_path, backing_param_name])
+                if fsdp_path
+                else backing_param_name
+            )
             # Get full param back with pad removed.
             if in_state_dict_key not in shard_weights[0] and (not strict):
                 continue
             shards = []
             for rank in range(original_world_size):
                 shard = shard_weights[rank][in_state_dict_key]
-                pad = shard_metadata[rank]["param_metadata"][fsdp_obj_idx]["params"][backing_param_name]["padding"]
+                pad = shard_metadata[rank]["param_metadata"][fsdp_obj_idx][
+                    "params"
+                ][backing_param_name]["padding"]
                 shards.append(_unpad(shard, pad))
                 if metadata["no_broadcast_optim_state"]:
                     break
@@ -85,7 +95,9 @@ def consolidate_shard_weights(
             names, shapes, numels, _ = v.values()
             assert sum(numels) == full_param.size(0)
             for n, t, s in zip(names, full_param.split(numels), shapes):
-                out_state_dict_key = ".".join([fsdp_path, n]) if fsdp_path else n
+                out_state_dict_key = (
+                    ".".join([fsdp_path, n]) if fsdp_path else n
+                )
                 consolidated_weights[out_state_dict_key] = t.view(s)
 
     # copy shared parameters
@@ -159,22 +171,22 @@ def consolidate_fsdp_shards(
     if "decoder.embed_tokens.weight" in weights[0].keys():
         shape = weights[0]["decoder.embed_tokens.weight"].shape
         logger.info(
-            f"This ckpt does not seem sharded. I see unflat params! like "
-            f"decoder.embed_tokens.weight shaped {shape}. Will just copy files "
-            f"and remove optim_state."
+            "This ckpt does not seem sharded. I see unflat params! like"
+            f" decoder.embed_tokens.weight shaped {shape}. Will just copy"
+            " files and remove optim_state."
         )
         do_consolidate = False
     if do_consolidate:
         num_parts = find_num_parts(names)
         if num_parts:
-            #consolidated_weights = consolidate_model_parallel(
+            # consolidated_weights = consolidate_model_parallel(
             #    metadata,
             #    names,
             #    strict,
             #    weights,
             #    parts=num_parts,
             #    no_stitch_megatron=no_stitch_megatron,
-            #)
+            # )
             print("- Part 1: consolidate Zero-3 shards.")
             consolidated_weights = consolidate_model_parallel_part1(
                 metadata,
@@ -189,14 +201,15 @@ def consolidate_fsdp_shards(
             if not no_stitch_megatron:
                 print("- Part 2: consolidate model-parallel parts.")
                 consolidated_weights = consolidate_model_parallel_part2(
-                    consolidated_weights)
+                    consolidated_weights
+                )
         else:
             print("FSDP.consolidate_shard_weights")
             consolidated_weights = consolidate_shard_weights(
                 shard_weights=weights, shard_metadata=metadata, strict=strict
             )
-        #del weights, metadata
-        #gc.collect()
+        # del weights, metadata
+        # gc.collect()
         done_consolidate = time.time()
         print(f"Done consolidating after {done_consolidate-t0//60} minutes")
     else:
@@ -221,10 +234,14 @@ def consolidate_fsdp_shards(
 
         if no_stitch_megatron:
             saved_paths = []
-            for part_id, part_consolidated_weights in consolidated_weights.items():
+            for (
+                part_id,
+                part_consolidated_weights,
+            ) in consolidated_weights.items():
                 saved_paths.append(
                     save_checkpoint(
-                        part_consolidated_weights, f"{save_prefix}-model_part-{part_id}"
+                        part_consolidated_weights,
+                        f"{save_prefix}-model_part-{part_id}",
                     )
                 )
             return saved_paths
@@ -299,7 +316,10 @@ def consolidate_model_parallel_part1(
                 metadata_parts[p].append(metadata[i])
     all_parts_consolidated = defaultdict(list)
     for k, v in tqdm(model_parts.items()):
-        print(f"Consolidate shards associated with part: {k}, with {len(v)} shards...")
+        print(
+            f"Consolidate shards associated with part: {k}, with"
+            f" {len(v)} shards..."
+        )
         part_weights = consolidate_shard_weights(
             shard_weights=v, shard_metadata=metadata_parts[k], strict=strict
         )
@@ -310,6 +330,7 @@ def consolidate_model_parallel_part1(
 def consolidate_model_parallel_part2(all_parts_consolidated):
     model = glue_megatron_parts(all_parts_consolidated)
     return model
+
 
 def handle_qkv_proj(model_parts, key):
     parts = [model_parts[part_id][key] for part_id in range(len(model_parts))]
@@ -325,14 +346,20 @@ def handle_qkv_proj(model_parts, key):
 def _handle_one(parts, is_weight):
     """Make it look like a normal LayerNorm"""
     n_parts = len(parts)
-    err_msg = f"Redundant ModelParallelFusedLayerNorm params have been updated."
+    err_msg = (
+        f"Redundant ModelParallelFusedLayerNorm params have been updated."
+    )
     if is_weight:
         init = 1.0
-        assert not torch.logical_and(parts[0].ne(1), parts[1].ne(1)).any(), err_msg
+        assert not torch.logical_and(
+            parts[0].ne(1), parts[1].ne(1)
+        ).any(), err_msg
 
     else:
         init = 0.0
-        assert not torch.logical_and(parts[0].ne(0), parts[1].ne(0)).any(), err_msg
+        assert not torch.logical_and(
+            parts[0].ne(0), parts[1].ne(0)
+        ).any(), err_msg
     ret_val = torch.cat([p.unsqueeze(-1) for p in parts], dim=1).sum(1) - (
         init * (n_parts - 1)
     )
@@ -367,9 +394,10 @@ def get_n_layers(glued_model):
         if f"decoder.layers.{n_layers}.fc1.weight" in glued_model:
             n_layers += 1
         else:
-            assert (
-                n_layers > 0
-            ), f"found 0 layers bc no keys matching decoder.layers.0.fc1.weight"
+            assert n_layers > 0, (
+                f"found 0 layers bc no keys matching"
+                f" decoder.layers.0.fc1.weight"
+            )
             return n_layers
 
 
@@ -378,7 +406,9 @@ def glue_megatron_parts(model_parts):
 
     def assert_all_close(key):
         for part_id in range(len(model_parts)):
-            if not torch.allclose(model_parts[part_id][key], model_parts[0][key]):
+            if not torch.allclose(
+                model_parts[part_id][key], model_parts[0][key]
+            ):
                 err = (
                     (model_parts[part_id][key] - model_parts[0][key])
                     .float()
@@ -402,24 +432,38 @@ def glue_megatron_parts(model_parts):
             glued_model[key.replace("qkv", "q")] = q
         elif "ffn_layernorm" in key:
             glued_model[key] = torch.cat(
-                [model_parts[part_id][key] for part_id in range(len(model_parts))]
+                [
+                    model_parts[part_id][key]
+                    for part_id in range(len(model_parts))
+                ]
             )
 
         elif "layer_norm" in key:
             assert_all_close(key)
             glued_model[key] = model_parts[0][key]
-        elif "fc1" in key or "k_proj" in key or "q_proj" in key or "v_proj" in key:
+        elif (
+            "fc1" in key
+            or "k_proj" in key
+            or "q_proj" in key
+            or "v_proj" in key
+        ):
             # Bias of CP gets concatenated
             if key.endswith("bias"):
                 glued_bias = torch.cat(
-                    [model_parts[part_id][key] for part_id in range(len(model_parts))]
+                    [
+                        model_parts[part_id][key]
+                        for part_id in range(len(model_parts))
+                    ]
                 )
                 glued_model[key] = glued_bias
             # weights of CP gets concatenated along dim 0
             else:
                 assert key.endswith("weight")
                 glued_weight = torch.cat(
-                    [model_parts[part_id][key] for part_id in range(len(model_parts))],
+                    [
+                        model_parts[part_id][key]
+                        for part_id in range(len(model_parts))
+                    ],
                     dim=0,
                 )
                 glued_model[key] = glued_weight
@@ -434,13 +478,19 @@ def glue_megatron_parts(model_parts):
             else:
                 assert key.endswith("weight")
                 glued_weight = torch.cat(
-                    [model_parts[part_id][key] for part_id in range(len(model_parts))],
+                    [
+                        model_parts[part_id][key]
+                        for part_id in range(len(model_parts))
+                    ],
                     dim=1,
                 )
                 glued_model[key] = glued_weight
         elif "embed_tokens.weight" in key:
             glued_weight = torch.cat(
-                [model_parts[part_id][key] for part_id in range(len(model_parts))],
+                [
+                    model_parts[part_id][key]
+                    for part_id in range(len(model_parts))
+                ],
                 dim=0,
             )
             glued_model[key] = glued_weight
@@ -461,7 +511,10 @@ def glue_megatron_parts(model_parts):
     # Consolidate ffn_layernorm.lns.weight.{part_id} -> ffn_layernorm.weight
     handle_legacy_ln_(glued_model, len(model_parts))
     assert "decoder.layers.0.ffn_layernorm.lns.0.weight" not in glued_model
-    print("- Done with consolidating model parallelism parts. See a summary below:")
+    print(
+        "- Done with consolidating model parallelism parts. See a summary"
+        " below:"
+    )
     for key in glued_model:
         print(f"    key: {key}, shape: {glued_model[key].shape}")
     return glued_model
@@ -483,8 +536,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--read-prefix", type=str, default="checkpoint_last")
     parser.add_argument("--save-prefix", type=str, default="consolidated")
-    parser.add_argument("--new-arch-name", type=str, default="transformer_lm_gpt")
+    parser.add_argument(
+        "--new-arch-name", type=str, default="transformer_lm_gpt"
+    )
     args = parser.parse_args()
-    consolidate_fsdp_shards(args.read_prefix,
-                            save_prefix=args.save_prefix,
-                            new_arch_name=args.new_arch_name)
+    consolidate_fsdp_shards(
+        args.read_prefix,
+        save_prefix=args.save_prefix,
+        new_arch_name=args.new_arch_name,
+    )
