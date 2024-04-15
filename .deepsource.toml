@@ -1,5 +1,10 @@
 version = 1
 
+exclude_patterns = [
+  "flexgen/**",
+  "benchmark/third_party/**"
+]
+
 [[analyzers]]
 name = "python"
 
