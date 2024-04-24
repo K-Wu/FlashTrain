@@ -41,7 +41,7 @@ class CustomFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-fmt = "%(levelname)-6s [%(filename)s:%(lineno)d] %(message)s"
+fmt = "%(levelname)-6s [%(threadName)s] [%(filename)s:%(lineno)d] %(message)s"
 
 stdout_handler = logging.StreamHandler()
 stdout_handler.setFormatter(CustomFormatter(fmt))

@@ -1,11 +1,11 @@
 import torch
 import os
-from recordclass import dataobject
+from dataclasses import dataclass
 
 
-def oneline_print(*args):
+def get_oneline_str(*args) -> str:
     reprs = [str(arg).replace("\n", "↵") for arg in args]
-    print(*reprs, flush=True)
+    return " ".join(reprs)
 
 
 # TODO: Use SelfDeletingTempFile instead of plain str in tensor_cache's tensor_id_to_filename
@@ -18,13 +18,15 @@ class SelfDeletingTempFile:
         os.remove(self.path)
 
 
-class TensorEqID(dataobject):
+@dataclass(frozen=True)  # Enable hashability
+class TensorEqID:  # (dataobject):
     """When PyTorch packs/unpacks tensors to/from computation graph, identical tensors may be wrapped by different Tensor objects to avoid cyclic reference. This class serves to determine if the underlying tensors are identical."""
 
     data_ptr: int
     dtype: torch.dtype
     size: int
     stride: tuple[int, ...]
+    device: torch.device
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor):
@@ -33,11 +35,17 @@ class TensorEqID(dataobject):
             dtype=tensor.dtype,
             size=tensor.untyped_storage().size(),
             stride=tensor.stride(),
+            device=tensor.device,
         )
 
     def __str__(self):
         stride_str = "_".join(map(str, self.stride))
-        return f"{self.data_ptr:x}_{self.dtype}_{self.size}_{stride_str}"
+        return (
+            f"{self.data_ptr:x}_{self.dtype}_{self.size}_{stride_str}_{str(self.device).replace(':', '_')}"
+        )
+
+    def __repr__(self):
+        return str(self)
 
 
 # TODO: Deduplicate file IO when is_tensor_equal is True
