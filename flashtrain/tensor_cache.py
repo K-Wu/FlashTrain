@@ -204,8 +204,19 @@ class TensorCache:
         return full_backward_pre_hook
 
     def get_backward_hook(self) -> Callable[..., None]:
+        def all_is_none(grad_input):
+            return all(g is None for g in grad_input)
+
         def full_backward_hook(m, grad_input, grad_output) -> None:
-            logger.info(f"Full backward hook for {get_oneline_str(m)}")
+            if all_is_none(grad_input):
+                logger.warning(
+                    f"grad_input is None for {get_oneline_str(m)}. This will"
+                    " trigger pre-mature cache clean up!"
+                )
+            logger.info(
+                f"Full backward hook for {get_oneline_str(m)}, {grad_input},"
+                f" {grad_output}"
+            )
             # We need to ensure thread-safety during the backward pass.
             with self.thread_lock:
                 # The runtime has finished the backward logic within module m.
