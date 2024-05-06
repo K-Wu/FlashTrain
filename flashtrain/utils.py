@@ -24,7 +24,7 @@ class TensorEqID:  # (dataobject):
 
     data_ptr: int
     dtype: torch.dtype
-    size: int
+    shape: tuple[int, ...]
     stride: tuple[int, ...]
     device: torch.device
 
@@ -33,15 +33,16 @@ class TensorEqID:  # (dataobject):
         return cls(
             data_ptr=tensor.untyped_storage().data_ptr(),
             dtype=tensor.dtype,
-            size=tensor.untyped_storage().size(),
+            shape=tuple(tensor.shape),
             stride=tensor.stride(),
             device=tensor.device,
         )
 
     def __str__(self):
-        stride_str = "_".join(map(str, self.stride))
+        stride_str = ".".join(map(str, self.stride))
+        shape_str = ".".join(map(str, self.shape))
         return (
-            f"{self.data_ptr:x}_{self.dtype}_{self.size}_{stride_str}_{str(self.device).replace(':', '_')}"
+            f"{self.data_ptr:x}_{self.dtype}_{shape_str}_{stride_str}_{str(self.device).replace(':', '_')}"
         )
 
     def __repr__(self):
@@ -55,11 +56,12 @@ def is_tensor_equal_ref(x: torch.Tensor, y: torch.Tensor) -> bool:
     """
     if x.untyped_storage().data_ptr() != y.untyped_storage().data_ptr():
         return False
-    if x.untyped_storage().size() != y.untyped_storage().size():
+    if x.shape != y.shape:
         return False
     if x.stride() != y.stride():
         return False
 
+    assert x.untyped_storage().size() == y.untyped_storage().size()
     return True
 
 

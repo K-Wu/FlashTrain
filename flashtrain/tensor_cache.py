@@ -34,9 +34,12 @@ def get_filename(
 
     TODO: add support for storing different devices' tensors in different directories.
     """
+    # Use TensorEqID instead of id(tensor) because id(tensor) collision may happen when the data pointers of the two different tensors are the same.
     return os.path.join(
         path,
-        f"{identifier}_{id(tensor)}_{str(tensor.device).replace(':', '_')}.pt",
+        (
+            f"{identifier}_{TensorEqID.from_tensor(tensor)}_{str(tensor.device).replace(':', '_')}.pt"
+        ),
     )
 
 
@@ -47,7 +50,7 @@ class TorchBuiltinIOAdapter:
         Save the tensor to the file.
         """
         torch.save(tensor, path)
-        logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)}")
+        logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)} to {path}")
 
     @classmethod
     def async_save_tensor(
@@ -58,7 +61,9 @@ class TorchBuiltinIOAdapter:
         lock: threading.Lock,
     ):
         torch.save(tensor, path)
-        logger.info(f"Async saved tensor {TensorEqID.from_tensor(tensor)}")
+        logger.info(
+            f"Async saved tensor {TensorEqID.from_tensor(tensor)} to {path}"
+        )
         with lock:
             del tensor_being_stored[TensorEqID.from_tensor(tensor)]
 
@@ -243,8 +248,9 @@ class TensorCache:
                     " trigger pre-mature cache clean up!"
                 )
             logger.info(
-                f"Full backward hook for {get_oneline_str(m)}, {grad_input},"
-                f" {grad_output}"
+                f"Full backward hook for {get_oneline_str(m)},"
+                f" {get_oneline_str(grad_input)},"
+                f" {get_oneline_str(grad_output)}"
             )
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -351,9 +357,7 @@ class TensorCache:
                         f"Unpacking {tensor_id_or_tensor},"
                         f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
                     )
-                    return self.tensor_id_to_loaded_tensor[
-                        tensor_id_or_tensor
-                    ].detach()  # detach() to avoid shape mismatch in AddmmBackward0
+                    return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
 
         return unpack_hook
 
