@@ -40,3 +40,8 @@ if output is not None:
     next_token_logits = output[0][:, -1, :]
     next_token = torch.argmax(next_token_logits, dim=-1)
     print(tokenizer.batch_decode(next_token))
+
+if __name__ == "__main__":
+    raise NotImplementedError(
+        "This script has not been tailored yet for single GPU."
+    )

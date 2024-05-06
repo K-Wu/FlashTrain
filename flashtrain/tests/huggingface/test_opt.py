@@ -37,19 +37,18 @@ def run(args):
     print(f"Total number of params = {get_number_of_params(opt) // 10 ** 6}M")
     print(opt)
 
-    # Input configs
-    example_inputs = generate_inputs_for_model(
-        model_class,
-        opt,
-        model_name,
-        args.batch_size,
-        args.device,
-        include_loss_args=True,
-    )
-    print(example_inputs["input_ids"].shape)
-
     # Run
     for idx in range(args.batches):
+        # Input configs
+        example_inputs = generate_inputs_for_model(
+            model_class,
+            opt,
+            model_name,
+            args.batch_size,
+            args.device,
+            include_loss_args=True,
+        )
+
         loss = opt(**example_inputs).loss
         loss.backward()
 

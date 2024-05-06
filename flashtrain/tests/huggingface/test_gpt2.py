@@ -36,18 +36,17 @@ def run(args):
     )
     print(gpt2)
 
-    # Input configs
-    example_inputs = generate_inputs_for_model(
-        model_class,
-        gpt2,
-        model_name,
-        args.batch_size,
-        args.device,
-        include_loss_args=True,
-    )
-
     # Run
     for idx in range(args.batches):
+        # Input configs
+        example_inputs = generate_inputs_for_model(
+            model_class,
+            gpt2,
+            model_name,
+            args.batch_size,
+            args.device,
+            include_loss_args=True,
+        )
         loss = gpt2(**example_inputs).loss
         loss.backward()
 

@@ -20,7 +20,6 @@ from transformers import LlamaForCausalLM, LlamaConfig
 from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 
-# TODO: use os.environ["HF_ACCESS_TOKEN"]
 def run(args):
     # Model configs
     config = LlamaConfig()
@@ -40,18 +39,18 @@ def run(args):
     )
     print(llama)
 
-    # Input configs
-    example_inputs = generate_inputs_for_model(
-        model_class,
-        llama,
-        model_name,
-        args.batch_size,
-        args.device,
-        include_loss_args=True,
-    )
-
     # Run
     for idx in range(args.batches):
+        # Input configs
+        example_inputs = generate_inputs_for_model(
+            model_class,
+            llama,
+            model_name,
+            args.batch_size,
+            args.device,
+            include_loss_args=True,
+        )
+
         loss = llama(**example_inputs).loss
         loss.backward()
 
