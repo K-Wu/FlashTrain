@@ -33,3 +33,5 @@ flexgen/apps/data_wrangle/core
 
 # tmp scripts
 today_job.sh
+
+*.dot
