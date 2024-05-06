@@ -35,7 +35,7 @@ class SimpleModelTestWithCache(TestCase):
                 self.assertTrue(n_p1[0] in n_p2[0])
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
-    def test_e2e_training(self) -> None:
+    def test_e2e_training(self, debug_viz=False) -> None:
         torch.manual_seed(0)
         model = SimpleModel().cuda()
         optim = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -82,6 +82,7 @@ class SimpleModelTestWithCache(TestCase):
         model_withcache.register_full_backward_hook(backward_hook)
 
         for i in range(5):
+            logger.info(f"iteration {i}")
             # Ensure all input across TP ranks are same.
             # TODO: add a get_group_rank() to DeviceMesh.
             torch.manual_seed(i)
@@ -108,7 +109,8 @@ class SimpleModelTestWithCache(TestCase):
             )
 
             output = model(input)
-            output.sum().backward()
+            loss = output.sum()
+            loss.backward()
             optim.step()
             with torch.autograd.graph.saved_tensors_hooks(
                 pack_hook, unpack_hook
@@ -120,6 +122,16 @@ class SimpleModelTestWithCache(TestCase):
             self.assertEqual(model(input), model_withcache(input))
 
         self._compare_params(model, model_withcache)
+
+        if debug_viz:
+            from torchviz import make_dot
+
+            make_dot(
+                model(input).sum(),
+                params=dict(model.named_parameters()),
+                show_attrs=True,
+                show_saved=True,
+            ).save("model.dot")
 
 
 if __name__ == "__main__":
