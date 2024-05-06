@@ -15,32 +15,10 @@ import argparse
 import os
 
 import torch
-import torch.distributed as dist
 
 from transformers import T5ForConditionalGeneration, T5Config
 
-from hf_utils import generate_inputs_for_model, get_number_of_params
-
-
-def add_split_points(t5, nranks):
-    # Number of encoder layers: t5.config.num_layers
-    # Number of decoder layers: t5.config.num_decoder_layers
-    # 6 encoder layers, 6 decoder layers, 12 layers in total
-    total_layers = t5.config.num_layers + t5.config.num_decoder_layers
-    layers_per_rank = (total_layers + nranks - 1) // nranks
-    print(f"Layers per rank = {layers_per_rank}")
-    # Split encoder
-    for i in range(1, t5.config.num_layers):
-        if i % layers_per_rank == 0:
-            annotate_split_points(
-                t5, {f"encoder.block.{i}": SplitPoint.BEGINNING}
-            )
-    # Split decoder
-    for i in range(0, t5.config.num_decoder_layers):
-        if i % layers_per_rank == 0:
-            annotate_split_points(
-                t5, {f"decoder.block.{i}": SplitPoint.BEGINNING}
-            )
+from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 
 def run(args):
@@ -53,56 +31,26 @@ def run(args):
     model_name = "T5ForConditionalGeneration"
     t5 = model_class(config)
     t5.to(args.device)
-    t5.eval()
-    if args.rank == 0:
-        print(t5.config)
-        print(
-            f"Total number of params = {get_number_of_params(t5) // 10 ** 6}M"
-        )
-        print(t5)
+    # t5.eval()
+    print(t5.config)
+    print(f"Total number of params = {get_number_of_params(t5) // 10 ** 6}M")
+    print(t5)
 
     # Input configs
     example_inputs = generate_inputs_for_model(
-        model_class, t5, model_name, args.batch_size, args.device
-    )
-
-    # Annotate split points
-    add_split_points(t5, args.world_size)
-
-    # Create pipeline
-    t5_pipe = pipeline(
+        model_class,
         t5,
-        num_chunks=args.chunks,
-        example_args=(),
-        example_kwargs=example_inputs,
-    )
-    assert (
-        t5_pipe.num_stages == args.world_size
-    ), f"pipe stages: {t5_pipe.num_stages}"
-    if args.rank == 0:
-        for i, sm in enumerate(t5_pipe.split_gm.children()):
-            print(
-                f"Pipeline stage {i} {get_number_of_params(sm) // 10 ** 6}M"
-                " params"
-            )
-
-    # Create schedule runtime
-    stage = PipelineStage(
-        t5_pipe,
-        args.rank,
-        device=args.device,
+        model_name,
+        args.batch_size,
+        args.device,
+        include_loss_args=True,
     )
 
-    # Attach to a schedule
-    schedule = ScheduleGPipe(stage, args.chunks)
+    for idx in range(args.batches):
+        loss = t5(**example_inputs).loss
+        loss.backward()
 
-    # Run
-    if args.rank == 0:
-        schedule.step(**example_inputs)
-    else:
-        out = schedule.step()
-
-    print(f"Rank {args.rank} completes")
+    print(f"Execution completes")
 
 
 if __name__ == "__main__":
@@ -110,7 +58,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--world_size", type=int, default=int(os.getenv("WORLD_SIZE", 4))
     )
-    parser.add_argument("--rank", type=int, default=int(os.getenv("RANK", -1)))
     parser.add_argument(
         "--master_addr",
         type=str,
@@ -130,17 +77,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.cuda:
-        dev_id = args.rank % torch.cuda.device_count()
-        args.device = torch.device(f"cuda:{dev_id}")
+        args.device = torch.device(f"cuda")
     else:
         args.device = torch.device("cpu")
-
-    # Init process group
-    backend = "nccl" if args.cuda else "gloo"
-    dist.init_process_group(
-        backend=backend,
-        rank=args.rank,
-        world_size=args.world_size,
-    )
 
     run(args)

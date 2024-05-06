@@ -8,11 +8,10 @@ import argparse
 import os
 
 import torch
-import torch.distributed as dist
 
 from transformers import GPT2ForSequenceClassification, GPT2Config
 
-from hf_utils import generate_inputs_for_model, get_number_of_params
+from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 
 def run(args):
@@ -21,6 +20,7 @@ def run(args):
     config.n_embd = args.n_embd or config.n_embd
     config.n_layer = args.n_layer or config.n_layer
     config.n_head = args.n_head or config.n_head
+    config.pad_token_id = 50256  # add pad token to allow batch_size>1
     print("Using device:", args.device)
 
     # Create model
@@ -28,66 +28,30 @@ def run(args):
     model_name = "GPT2ForSequenceClassification"
     gpt2 = model_class(config)
     gpt2.to(args.device)
-    gpt2.eval()
-    if args.rank == 0:
-        print(gpt2.config)
-        print(
-            "GPT-2 total number of params ="
-            f" {get_number_of_params(gpt2) // 10 ** 6}M"
-        )
-        print(gpt2)
+    # gpt2.eval()
+    print(gpt2.config)
+    print(
+        "GPT-2 total number of params ="
+        f" {get_number_of_params(gpt2) // 10 ** 6}M"
+    )
+    print(gpt2)
 
     # Input configs
     example_inputs = generate_inputs_for_model(
-        model_class, gpt2, model_name, args.batch_size, args.device
+        model_class,
+        gpt2,
+        model_name,
+        args.batch_size,
+        args.device,
+        include_loss_args=True,
     )
-
-    if args.autosplit:
-        # Automatic split
-        from pippy import split_into_equal_size
-
-        gpt2_pipe = pipeline(
-            gpt2,
-            num_chunks=args.chunks,
-            example_args=(),
-            example_kwargs=example_inputs,
-            split_policy=split_into_equal_size(args.world_size),
-        )
-    else:
-        # Manually annotate split points
-        add_split_points(gpt2, args.world_size)
-        gpt2_pipe = pipeline(
-            gpt2,
-            num_chunks=args.chunks,
-            example_args=(),
-            example_kwargs=example_inputs,
-        )
-
-    assert gpt2_pipe.num_stages == args.world_size
-    if args.rank == 0:
-        for i, sm in enumerate(gpt2_pipe.split_gm.children()):
-            print(
-                f"Pipeline stage {i} {get_number_of_params(sm) // 10 ** 6}M"
-                " params"
-            )
-
-    # Create schedule runtime
-    stage = PipelineStage(
-        gpt2_pipe,
-        args.rank,
-        device=args.device,
-    )
-
-    # Attach to a schedule
-    schedule = ScheduleGPipe(stage, args.chunks)
 
     # Run
-    if args.rank == 0:
-        schedule.step(**example_inputs)
-    else:
-        out = schedule.step()
+    for idx in range(args.batches):
+        loss = gpt2(**example_inputs).loss
+        loss.backward()
 
-    print(f"Rank {args.rank} completes")
+    print(f"Execution completes")
 
 
 if __name__ == "__main__":
@@ -95,7 +59,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--world_size", type=int, default=int(os.getenv("WORLD_SIZE", 4))
     )
-    parser.add_argument("--rank", type=int, default=int(os.getenv("RANK", -1)))
     parser.add_argument(
         "--master_addr",
         type=str,
@@ -122,17 +85,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.cuda:
-        dev_id = args.rank % torch.cuda.device_count()
-        args.device = torch.device(f"cuda:{dev_id}")
+        args.device = torch.device(f"cuda")
     else:
         args.device = torch.device("cpu")
-
-    # Init process group
-    backend = "nccl" if args.cuda else "gloo"
-    dist.init_process_group(
-        backend=backend,
-        rank=args.rank,
-        world_size=args.world_size,
-    )
 
     run(args)

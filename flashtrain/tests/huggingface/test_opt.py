@@ -15,21 +15,9 @@ import argparse
 import os
 
 import torch
-import torch.distributed as dist
 from transformers import OPTForCausalLM, OPTConfig
 
-from hf_utils import generate_inputs_for_model, get_number_of_params
-
-
-def add_split_points(opt, nranks):
-    layers_per_rank = opt.config.num_hidden_layers // nranks
-    for i in range(1, nranks):
-        annotate_split_points(
-            opt,
-            {
-                f"model.decoder.layers.{i * layers_per_rank}": SplitPoint.BEGINNING
-            },
-        )
+from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 
 def run(args):
@@ -42,57 +30,27 @@ def run(args):
     model_name = "OPTForCausalLM"
     opt = model_class(config)
     opt.to(args.device)
-    opt.eval()
-    if args.rank == 0:
-        print(opt.config)
-        print(
-            f"Total number of params = {get_number_of_params(opt) // 10 ** 6}M"
-        )
-        print(opt)
+    # opt.eval()
+    print(opt.config)
+    print(f"Total number of params = {get_number_of_params(opt) // 10 ** 6}M")
+    print(opt)
 
     # Input configs
     example_inputs = generate_inputs_for_model(
-        model_class, opt, model_name, args.batch_size, args.device
-    )
-
-    # Annotate split points
-    add_split_points(opt, args.world_size)
-
-    # Create pipeline
-    opt_pipe = pipeline(
+        model_class,
         opt,
-        num_chunks=args.chunks,
-        example_args=(),
-        example_kwargs=example_inputs,
+        model_name,
+        args.batch_size,
+        args.device,
+        include_loss_args=True,
     )
-
-    assert (
-        opt_pipe.num_stages == args.world_size
-    ), f"nstages = {opt_pipe.num_stages} nranks = {args.world_size}"
-    if args.rank == 0:
-        for i, sm in enumerate(opt_pipe.split_gm.children()):
-            print(
-                f"Pipeline stage {i} {get_number_of_params(sm) // 10 ** 6}M"
-                " params"
-            )
-
-    # Create schedule runtime
-    stage = PipelineStage(
-        opt_pipe,
-        args.rank,
-        device=args.device,
-    )
-
-    # Attach to a schedule
-    schedule = ScheduleGPipe(stage, args.chunks)
 
     # Run
-    if args.rank == 0:
-        schedule.step(**example_inputs)
-    else:
-        out = schedule.step()
+    for idx in range(args.batches):
+        loss = opt(**example_inputs).loss
+        loss.backward()
 
-    print(f"Rank {args.rank} completes")
+    print(f"Execution completes")
 
 
 if __name__ == "__main__":
@@ -100,7 +58,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--world_size", type=int, default=int(os.getenv("WORLD_SIZE", 4))
     )
-    parser.add_argument("--rank", type=int, default=int(os.getenv("RANK", -1)))
     parser.add_argument(
         "--master_addr",
         type=str,
@@ -120,17 +77,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.cuda:
-        dev_id = args.rank % torch.cuda.device_count()
-        args.device = torch.device(f"cuda:{dev_id}")
+        args.device = torch.device(f"cuda")
     else:
         args.device = torch.device("cpu")
-
-    # Init process group
-    backend = "nccl" if args.cuda else "gloo"
-    dist.init_process_group(
-        backend=backend,
-        rank=args.rank,
-        world_size=args.world_size,
-    )
 
     run(args)
