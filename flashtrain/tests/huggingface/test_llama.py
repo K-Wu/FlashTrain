@@ -1,60 +1,87 @@
-# Adapted from https://github.com/pytorch/PiPPy/blob/4cf876af4fd8931db99df11d30f64f2ff85c1b0c/examples/llama/pippy_llama.py
-# $ torchrun --nproc-per-node 4 pippy_llama.py
+# Adapted from https://github.com/pytorch/PiPPy/blob/9de3f4a9e697852da7279828519d8465c9cc9f7e/examples/huggingface/pippy_opt.py
+# Copyright (c) Meta Platforms, Inc. and affiliates
+
+# Minimum effort to run this example:
+# $ torchrun --nproc-per-node 2 pippy_opt.py
+
+# TODO: Enable training according to example_train.py
+# 1) get target (label) via generate_inputs_for_model argument
+# 2) Add loss function, loss_fn=torch.nn.MSELoss(reduction="sum"); schedule = ScheduleGPipe(stage, chunks, loss_fn=loss_fn)
+# 3) in the last stage, specify losses=[]; schedule.step(target=target, losses = losses)
+
+# According to the CPU init example, in this huggingface example, the pipeline should be created on the CPU and each stage is transfered to the corresponding GPU. Therefore, there won't be memory issue like the whole pipeline being instantiated on each GPU. Reference: https://github.com/pytorch/PiPPy/blob/main/examples/cpu_init/gpt2_cpu_init.py; https://github.com/pytorch/PiPPy/issues/988#issuecomment-2017042001
+
+import argparse
 import os
+
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import LlamaForCausalLM, LlamaConfig
 
-# Grab the model
-llama = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-2-7b-chat-hf", low_cpu_mem_usage=True
-)
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
+from .hf_utils import generate_inputs_for_model, get_number_of_params
 
-prompts = (
-    "How do you",
-    "I like to",
-    "Can I help",
-    "You need to",
-    "The weather is",
-    "I found a",
-    "What is your",
-    "You are so",
-)  # bs = 8
-tokenizer.pad_token = tokenizer.eos_token
 
-rank = int(os.environ["RANK"])
-world_size = int(os.environ["WORLD_SIZE"])
-device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
-llama.to(device).eval()
-inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+# TODO: use os.environ["HF_ACCESS_TOKEN"]
+def run(args):
+    # Model configs
+    config = LlamaConfig()
+    print("Using device:", args.device)
 
-# Cut model by equal number of layers per rank
-layers_per_rank = llama.config.num_hidden_layers // world_size
-for i in range(1, world_size):
-    annotate_split_points(
-        llama, {f"model.layers.{i * layers_per_rank}": SplitPoint.BEGINNING}
+    # Create model
+    model_class = LlamaForCausalLM
+    model_name = "LlamaForCausalLM"
+    llama = model_class(config)
+    llama.to(args.device)
+    # llama.eval()
+    print(llama.config)
+    print(
+        f"Total number of params = {get_number_of_params(llama) // 10 ** 6}M"
+    )
+    print(llama)
+
+    # Input configs
+    example_inputs = generate_inputs_for_model(
+        model_class,
+        llama,
+        model_name,
+        args.batch_size,
+        args.device,
+        include_loss_args=True,
     )
 
-# Create a pipeline representation from the model
-llama_pipe = pipeline(llama, world_size, example_args=(inputs["input_ids"],))
+    # Run
+    for idx in range(args.batches):
+        loss = llama(**example_inputs).loss
+        loss.backward()
 
-# Create pipeline stage for each rank
-torch.distributed.init_process_group(rank=rank, world_size=world_size)
-stage = PipelineStage(llama_pipe, rank, device=device)
+    print(f"Execution completes")
 
-# Attach to a schedule
-schedule = ScheduleGPipe(stage, world_size)
 
-# Run
-if rank == 0:
-    args = inputs["input_ids"]
-else:
-    args = None
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--world_size", type=int, default=int(os.getenv("WORLD_SIZE", 4))
+    )
+    parser.add_argument(
+        "--master_addr",
+        type=str,
+        default=os.getenv("MASTER_ADDR", "localhost"),
+    )
+    parser.add_argument(
+        "--master_port", type=str, default=os.getenv("MASTER_PORT", "29500")
+    )
+    parser.add_argument("--schedule", type=str, default="FillDrain")
+    parser.add_argument(
+        "--cuda", type=int, default=int(torch.cuda.is_available())
+    )
+    parser.add_argument("--chunks", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batches", type=int, default=1)
 
-output = schedule.step(args)
+    args = parser.parse_args()
 
-# Decode
-if output is not None:
-    next_token_logits = output[0][:, -1, :]
-    next_token = torch.argmax(next_token_logits, dim=-1)
-    print(tokenizer.batch_decode(next_token))
+    if args.cuda:
+        args.device = torch.device(f"cuda")
+    else:
+        args.device = torch.device("cpu")
+
+    run(args)
