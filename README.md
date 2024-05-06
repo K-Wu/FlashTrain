@@ -3,5 +3,8 @@
 [![CodeFactor](https://www.codefactor.io/repository/github/k-wu/flashtrain/badge?s=7f86943f3ba426ae1f40ab671f340937ea231e4b)](https://www.codefactor.io/repository/github/k-wu/flashtrain)
 [![DeepSource](https://app.deepsource.com/gh/K-Wu/FlashTrain.svg/?label=active+issues&show_trend=true&token=d7YCxKKgZgyhjlQrCMVkugyJ)](https://app.deepsource.com/gh/K-Wu/FlashTrain/)
 
+## Dependencies
+[Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
+
 ## Contact
 Kun Wu kunwu2 (at) illinois (dot) edu  [![wakatime](https://wakatime.com/badge/github/K-Wu/FlashTrain.svg)](https://wakatime.com/badge/github/K-Wu/FlashTrain)

@@ -7,7 +7,7 @@ https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial
 import torch
 import os
 import socket
-from typing import Callable
+from typing import Callable, Any
 import weakref
 import concurrent.futures
 from .utils import TensorEqID
@@ -40,59 +40,82 @@ def get_filename(
     )
 
 
-def save_tensor(tensor: torch.Tensor, path: str):
-    """
-    Save the tensor to the file.
-    """
-    torch.save(tensor, path)
-    logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)}")
+class TorchBuiltinIOAdapter:
+    @classmethod
+    def save_tensor(cls, tensor: torch.Tensor, path: str):
+        """
+        Save the tensor to the file.
+        """
+        torch.save(tensor, path)
+        logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)}")
+
+    @classmethod
+    def async_save_tensor(
+        cls,
+        tensor: torch.Tensor,
+        path: str,
+        tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
+        lock: threading.Lock,
+    ):
+        torch.save(tensor, path)
+        logger.info(f"Async saved tensor {TensorEqID.from_tensor(tensor)}")
+        with lock:
+            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
+
+    @classmethod
+    def load_tensor(
+        cls,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        """
+        Load the tensor from the file.
+        """
+        # We rely on torch.load to determine the device of the tensor as the device it was originally on when saved was serialized into the file as well.
+
+        logger.info(f"Loading tensor from path {path}")
+        return torch.load(path)
+
+    @classmethod
+    def async_load_tensor(
+        cls,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
+        tensor_id: TensorEqID,
+        tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
+        lock: threading.Lock,
+    ):
+        """
+        Load the tensor from the file.
+        """
+        logger.info(f"Async loading tensor from path {path}")
+        with lock:
+            tensor_id_to_loaded_tensor[tensor_id] = torch.load(path)
+            del tensor_being_loaded[tensor_id]
+
+    @classmethod
+    def clean_up_in_backward(
+        cls,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        pass
+
+    # TODO: implement clean_up_when_end to delete files
 
 
-def async_save_tensor(
-    tensor: torch.Tensor,
-    path: str,
-    tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
-    thread_lock: threading.Lock,
-):
-    torch.save(tensor, path)
-    logger.info(f"Async saved tensor {TensorEqID.from_tensor(tensor)}")
-    with thread_lock:
-        del tensor_being_stored[TensorEqID.from_tensor(tensor)]
-
-
-def load_tensor(path: str):
-    """
-    Load the tensor from the file.
-    """
-    # We rely on torch.load to determine the device of the tensor as the device it was originally on when saved was serialized into the file as well.
-
-    logger.info(f"Loading tensor from path {path}")
-    return torch.load(path)
-
-
-def async_load_tensor(
-    path: str,
-    tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
-    tensor_id: TensorEqID,
-    tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
-    thread_lock: threading.Lock,
-):
-    """
-    Load the tensor from the file.
-    """
-    logger.info(f"Async loading tensor from path {path}")
-    with thread_lock:
-        tensor_id_to_loaded_tensor[tensor_id] = torch.load(path)
-        del tensor_being_loaded[tensor_id]
-
-
-def del_dict_key_if_exists(
-    d: dict, key: ..., thread_lock: "threading.Lock | None"
-):
-    if thread_lock is None:
+def del_dict_key_if_exists(d: dict, key: ..., lock: "threading.Lock | None"):
+    if lock is None:
         cm = contextlib.nullcontext()
     else:
-        cm = thread_lock
+        cm = lock
     with cm:
         if key in d:
             del d[key]
@@ -114,7 +137,9 @@ class TensorCache:
 
     # In forward propagation, weak ref to tensor are dictionary values to allow the tensor to be garbage collected.
     tensor_id_to_tensor_to_store: dict[TensorEqID, weakref.ref[torch.Tensor]]
-    tensor_id_to_filename: dict[TensorEqID, str]
+    tensor_id_to_filename_and_metadata: dict[
+        TensorEqID, tuple[str, torch.Size, torch.dtype, torch.device]
+    ]
     # TODO: delete files specified in filename_finished_use in the end of the program.
     filename_finished_use: set[str]
 
@@ -125,9 +150,11 @@ class TensorCache:
     tensor_being_stored: dict[TensorEqID, concurrent.futures.Future]
     tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future]
 
-    thread_lock: threading.Lock
+    lock: threading.Lock
 
     parameters: set[TensorEqID]
+
+    adapter: TorchBuiltinIOAdapter | Any
 
     def __init__(self):
         self.module_id_to_tensor_ids = {}
@@ -139,7 +166,7 @@ class TensorCache:
         self.backward_done_modules_with_cache_uncleared = set()
 
         self.tensor_id_to_tensor_to_store = {}
-        self.tensor_id_to_filename = {}
+        self.tensor_id_to_filename_and_metadata = {}
         self.filename_finished_use = set()
 
         self.tensor_id_to_loaded_tensor = {}
@@ -148,9 +175,11 @@ class TensorCache:
         self.tensor_being_stored = {}
         self.tensor_being_loaded = {}
 
-        self.thread_lock = threading.Lock()
+        self.lock = threading.Lock()
 
         self.parameters = set()
+
+        self.adapter = TorchBuiltinIOAdapter()
 
     def __del__(self):
         # This function is only triggered when the reference count of the object is zero. In this case, we need to shutdown the executor.
@@ -218,7 +247,7 @@ class TensorCache:
                 f" {grad_output}"
             )
             # We need to ensure thread-safety during the backward pass.
-            with self.thread_lock:
+            with self.lock:
                 # The runtime has finished the backward logic within module m.
                 self.backward_done_modules.add(id(m))
                 self.backward_done_modules_with_cache_uncleared.add(id(m))
@@ -234,23 +263,29 @@ class TensorCache:
             """
             tensor_id = TensorEqID.from_tensor(tensor)
 
-            # We need to ensure thread-safety during the backward pass.
-            with self.thread_lock:
+            # We need to ensure thread-safety.
+            with self.lock:
                 # Skip parameters because they will stay in memory always.
                 if tensor_id in self.parameters:
                     logger.info(f"Tensor cache skips packing {tensor_id}")
                     return tensor
                 logger.info(f"Packing {tensor_id}, {tensor.shape}")
                 if tensor_id not in self.tensor_id_to_tensor_to_store:
-                    self.tensor_id_to_filename[tensor_id] = get_filename(
-                        get_process_descriptor(), tensor
+                    logger.info(
+                        f"Adding tensor {tensor_id} into tensor to store"
+                    )
+                    self.tensor_id_to_filename_and_metadata[tensor_id] = (
+                        get_filename(get_process_descriptor(), tensor),
+                        tensor.shape,
+                        tensor.dtype,
+                        tensor.device,
                     )
                     self.tensor_being_stored[tensor_id] = self.executor.submit(
-                        async_save_tensor,
+                        self.adapter.async_save_tensor,
                         tensor,
-                        self.tensor_id_to_filename[tensor_id],
+                        self.tensor_id_to_filename_and_metadata[tensor_id][0],
                         self.tensor_being_stored,
-                        self.thread_lock,
+                        self.lock,
                     )
                     self.tensor_id_to_tensor_to_store[tensor_id] = weakref.ref(
                         tensor
@@ -259,6 +294,10 @@ class TensorCache:
                     self.tensor_id_to_module_ids[tensor_id] = set()
                 self.tensor_id_to_module_ids[tensor_id].add(
                     self.forward_module_scope_stack[-1]
+                )
+                logger.info(
+                    f"Recording tensor {tensor_id} being used in module"
+                    f" {self.forward_module_scope_stack[-1]}"
                 )
                 self.module_id_to_tensor_ids[
                     self.forward_module_scope_stack[-1]
@@ -272,12 +311,13 @@ class TensorCache:
             tensor_id_or_tensor: TensorEqID | torch.Tensor,
         ) -> torch.Tensor:
             # We need to ensure thread-safety during the backward pass.
-            with self.thread_lock:
+            with self.lock:
                 # Skip parameters because they will stay in memory always.
                 if isinstance(tensor_id_or_tensor, torch.Tensor):
                     logger.info(
                         "Tensor cache skips unpacking"
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)}"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        f" {tensor_id_or_tensor.shape}"
                     )
                     assert (
                         TensorEqID.from_tensor(tensor_id_or_tensor)
@@ -292,15 +332,28 @@ class TensorCache:
                     ):
                         self.tensor_id_to_loaded_tensor[
                             tensor_id_or_tensor
-                        ] = load_tensor(
-                            self.tensor_id_to_filename[tensor_id_or_tensor]
+                        ] = self.adapter.load_tensor(
+                            self.tensor_id_to_filename_and_metadata[
+                                tensor_id_or_tensor
+                            ][0],
+                            self.tensor_id_to_filename_and_metadata[
+                                tensor_id_or_tensor
+                            ][1],
+                            self.tensor_id_to_filename_and_metadata[
+                                tensor_id_or_tensor
+                            ][2],
+                            self.tensor_id_to_filename_and_metadata[
+                                tensor_id_or_tensor
+                            ][3],
                         )
 
                     logger.info(
                         f"Unpacking {tensor_id_or_tensor},"
                         f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
                     )
-                    return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
+                    return self.tensor_id_to_loaded_tensor[
+                        tensor_id_or_tensor
+                    ].detach()  # detach() to avoid shape mismatch in AddmmBackward0
 
         return unpack_hook
 
@@ -310,7 +363,7 @@ class TensorCache:
         """
         for tensor_id in self.module_id_to_tensor_ids[id(module)]:
             # We need to ensure thread-safety during the backward pass.
-            with self.thread_lock:
+            with self.lock:
                 # Load the tensor if it has not been loaded yet.
                 if not tensor_id in self.tensor_id_to_loaded_tensor:
                     # Try to get the tensor from memory if it is not removed after forward pass.
@@ -325,8 +378,19 @@ class TensorCache:
                             # Blocking load the tensor from the file.
                             self.tensor_id_to_loaded_tensor[
                                 tensor_id
-                            ] = load_tensor(
-                                self.tensor_id_to_filename[tensor_id]
+                            ] = self.adapter.load_tensor(
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][0],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][1],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][2],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][3],
                             )
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.
         return
@@ -334,7 +398,7 @@ class TensorCache:
     def prefetch_saved_tensors(self, module: torch.nn.Module) -> None:
         for tensor_id in self.module_id_to_tensor_ids[id(module)]:
             # We need to ensure thread-safety during the backward pass.
-            with self.thread_lock:
+            with self.lock:
                 # Async load the tensor if it has not been loaded yet.
                 if not tensor_id in self.tensor_id_to_loaded_tensor:
                     # Try to get the tensor from memory if it is not removed after forward pass.
@@ -347,12 +411,23 @@ class TensorCache:
                             self.tensor_being_loaded[
                                 tensor_id
                             ] = self.executor.submit(
-                                async_load_tensor,
-                                self.tensor_id_to_filename[tensor_id],
+                                self.adapter.async_load_tensor,
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][0],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][1],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][2],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][3],
                                 self.tensor_id_to_loaded_tensor,
                                 tensor_id,
                                 self.tensor_being_loaded,
-                                self.thread_lock,
+                                self.lock,
                             )
                         # else: The tensor is being prefetched. Do nothing.
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.
@@ -364,11 +439,13 @@ class TensorCache:
         When tensors are not required by any modules, remove them from dictionaries including self.tensor_id_to_tensor_to_store. In this way, the tensors can be garbage collected if no other references exist.
         """
         # We need to ensure thread-safety during the backward pass.
-        with self.thread_lock:
+        with self.lock:
             for module_id in self.backward_done_modules_with_cache_uncleared:
                 for tensor_id in self.module_id_to_tensor_ids[module_id]:
                     logger.info(
-                        f"Removing tensor from tensor cache {tensor_id}"
+                        f"Removing tensor from tensor cache {tensor_id} for"
+                        f" module {module_id}. Modules to clear"
+                        f" {self.backward_done_modules_with_cache_uncleared}"
                     )
                     if tensor_id in self.tensor_id_to_module_ids:
                         self.tensor_id_to_module_ids[tensor_id].remove(
@@ -393,12 +470,9 @@ class TensorCache:
                             None,
                         )
                         self.filename_finished_use.add(
-                            self.tensor_id_to_filename[tensor_id]
-                        )
-                        del_dict_key_if_exists(
-                            self.tensor_id_to_filename,
-                            tensor_id,
-                            None,
+                            self.tensor_id_to_filename_and_metadata[tensor_id][
+                                0
+                            ]
                         )
                         del_dict_key_if_exists(
                             self.tensor_id_to_loaded_tensor,
@@ -409,6 +483,11 @@ class TensorCache:
                             self.tensor_being_stored,
                             tensor_id,
                             None,
+                        )
+                        self.adapter.clean_up_in_backward(
+                            *self.tensor_id_to_filename_and_metadata[
+                                tensor_id
+                            ][0:4]
                         )
             del self.module_id_to_tensor_ids[module_id]
             del self.module_id_to_module[module_id]
