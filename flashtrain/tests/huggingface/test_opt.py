@@ -22,7 +22,9 @@ from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 def run(args):
     # Model configs
-    config = OPTConfig()
+    config = OPTConfig().from_pretrained("facebook/opt-125m")
+    # Set a very small number of hidden layers to allow training on RTX 3090
+    config.num_hidden_layers = 3
     print("Using device:", args.device)
 
     # Create model
@@ -44,6 +46,7 @@ def run(args):
         args.device,
         include_loss_args=True,
     )
+    print(example_inputs["input_ids"].shape)
 
     # Run
     for idx in range(args.batches):
