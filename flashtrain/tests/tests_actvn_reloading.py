@@ -6,6 +6,12 @@ from torch.testing._internal.common_utils import TestCase, run_tests
 from .. import tensor_cache as TC
 import logging
 from ..logger import logger
+from ..utils import (
+    register_forward_hook_recursively,
+    register_full_backward_hook_recursively,
+    register_forward_pre_hook_recursively,
+    register_full_backward_pre_hook_recursively,
+)
 
 
 class SimpleModel(nn.Module):
@@ -35,7 +41,9 @@ class SimpleModelTestWithCache(TestCase):
                 self.assertTrue(n_p1[0] in n_p2[0])
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
-    def test_e2e_training(self, debug_viz=False) -> None:
+    def test_e2e_training(
+        self, use_recursive_do=True, debug_viz=False
+    ) -> None:
         torch.manual_seed(0)
         model = SimpleModel().cuda()
         optim = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -63,23 +71,41 @@ class SimpleModelTestWithCache(TestCase):
         backward_pre_hook = tensor_cache.get_backward_pre_hook()
         pack_hook = tensor_cache.get_pack_hook()
         unpack_hook = tensor_cache.get_unpack_hook()
-        model_withcache.register_forward_pre_hook(forward_pre_hook)
-        model_withcache.register_forward_hook(forward_hook)
 
-        model_withcache.net1.register_forward_pre_hook(forward_pre_hook)
-        model_withcache.net2.register_forward_pre_hook(forward_pre_hook)
-        model_withcache.net3.register_forward_pre_hook(forward_pre_hook)
-        model_withcache.net1.register_forward_hook(forward_hook)
-        model_withcache.net2.register_forward_hook(forward_hook)
-        model_withcache.net3.register_forward_hook(forward_hook)
-        model_withcache.net1.register_full_backward_hook(backward_hook)
-        model_withcache.net2.register_full_backward_hook(backward_hook)
-        model_withcache.net3.register_full_backward_hook(backward_hook)
-        model_withcache.net1.register_full_backward_pre_hook(backward_pre_hook)
-        model_withcache.net2.register_full_backward_pre_hook(backward_pre_hook)
-        model_withcache.net3.register_full_backward_pre_hook(backward_pre_hook)
-        model_withcache.register_full_backward_pre_hook(backward_pre_hook)
-        model_withcache.register_full_backward_hook(backward_hook)
+        if use_recursive_do:
+            register_forward_pre_hook_recursively(
+                model_withcache, forward_pre_hook
+            )
+            register_forward_hook_recursively(model_withcache, forward_hook)
+            register_full_backward_pre_hook_recursively(
+                model_withcache, backward_pre_hook
+            )
+            register_full_backward_hook_recursively(
+                model_withcache, backward_hook
+            )
+        else:
+            model_withcache.register_forward_pre_hook(forward_pre_hook)
+            model_withcache.register_forward_hook(forward_hook)
+            model_withcache.net1.register_forward_pre_hook(forward_pre_hook)
+            model_withcache.net2.register_forward_pre_hook(forward_pre_hook)
+            model_withcache.net3.register_forward_pre_hook(forward_pre_hook)
+            model_withcache.net1.register_forward_hook(forward_hook)
+            model_withcache.net2.register_forward_hook(forward_hook)
+            model_withcache.net3.register_forward_hook(forward_hook)
+            model_withcache.net1.register_full_backward_hook(backward_hook)
+            model_withcache.net2.register_full_backward_hook(backward_hook)
+            model_withcache.net3.register_full_backward_hook(backward_hook)
+            model_withcache.net1.register_full_backward_pre_hook(
+                backward_pre_hook
+            )
+            model_withcache.net2.register_full_backward_pre_hook(
+                backward_pre_hook
+            )
+            model_withcache.net3.register_full_backward_pre_hook(
+                backward_pre_hook
+            )
+            model_withcache.register_full_backward_pre_hook(backward_pre_hook)
+            model_withcache.register_full_backward_hook(backward_hook)
 
         for i in range(5):
             logger.info(f"iteration {i}")

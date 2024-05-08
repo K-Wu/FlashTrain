@@ -10,11 +10,11 @@ import socket
 from typing import Callable, Any
 import weakref
 import concurrent.futures
-from .utils import TensorEqID
+from .tensor_cache_utils import TensorEqID
 import threading
 import contextlib
 from .logger import logger
-from .utils import get_oneline_str
+from .tensor_cache_utils import get_oneline_str
 
 
 def get_process_descriptor() -> str:
@@ -211,7 +211,10 @@ class TensorCache:
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
         def forward_pre_hook(m, inputs) -> None:
-            logger.info(f"Forward pre hook for {get_oneline_str(m)}")
+            logger.info(
+                f"Forward pre hook for {get_oneline_str(m)}, is Linear:"
+                f" {'Linear' in str(m)}"
+            )
             # The runtime is to do the forward logic within module m.
             self.forward_module_scope_stack.append(id(m))
 
