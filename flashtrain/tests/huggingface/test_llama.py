@@ -122,5 +122,5 @@ if __name__ == "__main__":
     else:
         args.device = torch.device("cpu")
 
-    # logger.setLevel(logging.getLevelName("INFO"))
+    logger.setLevel(logging.getLevelName("INFO"))
     run(args)

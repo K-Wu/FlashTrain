@@ -132,13 +132,15 @@ class TensorCache:
     parameters: set[TensorEqID]
 
     # We store the id of module to avoid affecting the garbage collection of module.
-    module_id_to_tensor_ids: dict[int, set[TensorEqID]]
-    tensor_id_to_module_ids: dict[TensorEqID, set[int]]
+    module_id_to_tensor_ids: dict[int | tuple[int, int], set[TensorEqID]]
+    tensor_id_to_module_ids: dict[TensorEqID, set[int | tuple[int, int]]]
 
     module_id_to_module: dict[int, weakref.ref[torch.nn.Module]]
-    forward_module_scope_stack: list[int]
-    backward_done_modules: set[int]
-    backward_done_modules_with_cache_uncleared: set[int]
+    # Only reentered module is recorded in module_id_to_reenter_count
+    module_id_to_reenter_count: dict[int, int]
+    forward_module_scope_stack: list[int | tuple[int, int]]
+    backward_done_modules: set[int | tuple[int, int]]
+    backward_done_modules_with_cache_uncleared: set[int | tuple[int, int]]
 
     # In forward propagation, weak ref to tensor are dictionary values to allow the tensor to be garbage collected.
     tensor_id_to_tensor_to_store: dict[TensorEqID, weakref.ref[torch.Tensor]]
@@ -166,6 +168,7 @@ class TensorCache:
         self.tensor_id_to_module_ids = {}
 
         self.module_id_to_module = {}
+        self.module_id_to_reenter_count = {}
         self.forward_module_scope_stack = []
         self.backward_done_modules = set()
         self.backward_done_modules_with_cache_uncleared = set()
@@ -224,21 +227,43 @@ class TensorCache:
                 f"Forward pre hook for {get_oneline_str(m)}, is Linear:"
                 f" {'Linear' in str(m)}"
             )
-            # The runtime is to do the forward logic within module m.
-            self.forward_module_scope_stack.append(id(m))
 
             if id(m) not in self.module_id_to_module:
+                # The runtime is to do the forward logic within module m.
+                self.forward_module_scope_stack.append(id(m))
                 self.module_id_to_module[id(m)] = weakref.ref(m)
-            if id(m) not in self.module_id_to_tensor_ids:
-                self.module_id_to_tensor_ids[id(m)] = set()
+            else:
+                logger.warning(
+                    f"Module {get_oneline_str(m)}(id(m)) already exists in"
+                    " self.module_id_to_module"
+                )
+                self.module_id_to_reenter_count[id(m)] = (
+                    # get the reenter count in case this is the first reentrance
+                    self.module_id_to_reenter_count.get(id(m), 0)
+                    + 1
+                )
+                self.forward_module_scope_stack.append(
+                    (id(m), self.module_id_to_reenter_count[id(m)])
+                )
+            assert (
+                self.forward_module_scope_stack[-1]
+                not in self.module_id_to_tensor_ids
+            )
+            self.module_id_to_tensor_ids[
+                self.forward_module_scope_stack[-1]
+            ] = set()
 
         return forward_pre_hook
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, inputs, outputs) -> None:
-            logger.info(f"Forward hook for {get_oneline_str(m)}")
+            logger.info(f"Forward hook for {get_oneline_str(m)}({id(m)})")
             # The runtime has finished the forward logic within module m.
-            assert self.forward_module_scope_stack[-1] == id(m)
+            if isinstance(self.forward_module_scope_stack[-1], tuple):
+                # Reenterred context
+                assert self.forward_module_scope_stack[-1][0] == id(m)
+            else:
+                assert self.forward_module_scope_stack[-1] == id(m)
             self.forward_module_scope_stack.pop()
 
         return forward_hook
@@ -266,9 +291,21 @@ class TensorCache:
             )
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
-                # The runtime has finished the backward logic within module m.
-                self.backward_done_modules.add(id(m))
-                self.backward_done_modules_with_cache_uncleared.add(id(m))
+                if id(m) in self.module_id_to_reenter_count:
+                    # This module is reentered. We need to clean the cache of the corresponding reentered context rather than the first context.
+                    self.backward_done_modules.add(
+                        (id(m), self.module_id_to_reenter_count[id(m)])
+                    )
+                    self.backward_done_modules_with_cache_uncleared.add(
+                        (id(m), self.module_id_to_reenter_count[id(m)])
+                    )
+                    self.module_id_to_reenter_count[id(m)] -= 1
+                    if self.module_id_to_reenter_count[id(m)] == 0:
+                        del self.module_id_to_reenter_count[id(m)]
+                else:
+                    # The runtime has finished the backward logic within module m.
+                    self.backward_done_modules.add(id(m))
+                    self.backward_done_modules_with_cache_uncleared.add(id(m))
             self.clear_up_done_backward_modules_cache()
 
         return full_backward_hook
@@ -377,7 +414,13 @@ class TensorCache:
         """
         Get the saved tensors for backward in the forward pass.
         """
-        for tensor_id in self.module_id_to_tensor_ids[id(module)]:
+        if id(module) in self.module_id_to_reenter_count:
+            tensor_ids = self.module_id_to_tensor_ids[
+                (id(module), self.module_id_to_reenter_count[id(module)])
+            ]
+        else:
+            tensor_ids = self.module_id_to_tensor_ids[id(module)]
+        for tensor_id in tensor_ids:
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
                 # Load the tensor if it has not been loaded yet.
@@ -412,7 +455,13 @@ class TensorCache:
         return
 
     def prefetch_saved_tensors(self, module: torch.nn.Module) -> None:
-        for tensor_id in self.module_id_to_tensor_ids[id(module)]:
+        if id(module) in self.module_id_to_reenter_count:
+            tensor_ids = self.module_id_to_tensor_ids[
+                (id(module), self.module_id_to_reenter_count[id(module)])
+            ]
+        else:
+            tensor_ids = self.module_id_to_tensor_ids[id(module)]
+        for tensor_id in tensor_ids:
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
                 # Async load the tensor if it has not been loaded yet.
@@ -505,8 +554,9 @@ class TensorCache:
                                 tensor_id
                             ][0:4]
                         )
-            del self.module_id_to_tensor_ids[module_id]
-            del self.module_id_to_module[module_id]
+                del self.module_id_to_tensor_ids[module_id]
+                if isinstance(module_id, int):
+                    del self.module_id_to_module[module_id]
             self.backward_done_modules_with_cache_uncleared.clear()
 
     # def remove_done_from_storing_queue(self):
