@@ -256,8 +256,8 @@ class TensorCache:
         def full_backward_hook(m, grad_input, grad_output) -> None:
             if all_is_none(grad_input):
                 logger.warning(
-                    f"grad_input is None for {get_oneline_str(m)}. This will"
-                    " trigger pre-mature cache clean up!"
+                    f"All grad_input is None for {get_oneline_str(m)}. This"
+                    " may trigger pre-mature cache clean up!"
                 )
             logger.info(
                 f"Full backward hook for {get_oneline_str(m)},"

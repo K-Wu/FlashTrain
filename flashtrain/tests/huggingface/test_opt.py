@@ -16,11 +16,22 @@ import os
 
 import torch
 from transformers import OPTForCausalLM, OPTConfig
+from ... import tensor_cache as TC
+from ...utils import (
+    register_forward_hook_recursively,
+    register_full_backward_hook_recursively,
+    register_forward_pre_hook_recursively,
+    register_full_backward_pre_hook_recursively,
+)
+import logging
+from ...logger import logger
+
+import contextlib
 
 from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 
-def run(args):
+def run(args, use_cache=True):
     # Model configs
     config = OPTConfig().from_pretrained("facebook/opt-125m")
     # Set a very small number of hidden layers to allow training on RTX 3090
@@ -37,6 +48,26 @@ def run(args):
     print(f"Total number of params = {get_number_of_params(opt) // 10 ** 6}M")
     print(opt)
 
+    if use_cache:
+        tensor_cache = TC.TensorCache()
+        tensor_cache.add_parameters_from_module(opt)
+
+        forward_hook = tensor_cache.get_forward_hook()
+        backward_hook = tensor_cache.get_backward_hook()
+        forward_pre_hook = tensor_cache.get_forward_pre_hook()
+        backward_pre_hook = tensor_cache.get_backward_pre_hook()
+        pack_hook = tensor_cache.get_pack_hook()
+        unpack_hook = tensor_cache.get_unpack_hook()
+
+        register_forward_hook_recursively(opt, forward_hook)
+        register_full_backward_hook_recursively(opt, backward_hook)
+        register_forward_pre_hook_recursively(opt, forward_pre_hook)
+        register_full_backward_pre_hook_recursively(opt, backward_pre_hook)
+
+        cm = torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook)
+    else:
+        cm = contextlib.nullcontext()
+
     # Run
     for idx in range(args.batches):
         # Input configs
@@ -48,9 +79,15 @@ def run(args):
             args.device,
             include_loss_args=True,
         )
+        # print(example_inputs.keys()) # input_ids, labels
 
-        loss = opt(**example_inputs).loss
-        loss.backward()
+        tensor_cache.add_inputs_or_parameters(example_inputs["input_ids"])
+        tensor_cache.add_inputs_or_parameters(example_inputs["labels"])
+        with cm:
+            loss = opt(**example_inputs).loss
+            loss.backward()
+        tensor_cache.del_inputs_or_parameters(example_inputs["input_ids"])
+        tensor_cache.del_inputs_or_parameters(example_inputs["labels"])
 
     print(f"Execution completes")
 
@@ -83,4 +120,5 @@ if __name__ == "__main__":
     else:
         args.device = torch.device("cpu")
 
+    logger.setLevel(logging.getLevelName("INFO"))
     run(args)
