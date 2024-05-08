@@ -204,8 +204,17 @@ class TensorCache:
             {TensorEqID.from_tensor(input) for input in inputs}
         )
         logger.info(
-            "Added inputs to cache"
-            f" {get_oneline_str(*{TensorEqID.from_tensor(input) for input in inputs})}"
+            "Added inputs or parameters to cache"
+            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input)) for input in inputs}))}"
+        )
+
+    def del_inputs_or_parameters(self, *inputs: torch.Tensor):
+        self.parameters = self.parameters.difference(
+            {TensorEqID.from_tensor(input) for input in inputs}
+        )
+        logger.info(
+            "Deleted inputs or parameters from cache"
+            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input)) for input in inputs}))}"
         )
 
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
