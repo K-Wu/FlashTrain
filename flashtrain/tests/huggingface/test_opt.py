@@ -16,7 +16,7 @@ import os
 
 import torch
 from transformers import OPTForCausalLM, OPTConfig
-from ... import tensor_cache as TC
+from ...tensor_cache import tensor_cache as TC
 from ...utils import (
     register_forward_hook_recursively,
     register_full_backward_hook_recursively,

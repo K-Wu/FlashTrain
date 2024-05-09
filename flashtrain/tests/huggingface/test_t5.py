@@ -17,7 +17,7 @@ import os
 import torch
 
 from transformers import T5ForConditionalGeneration, T5Config
-from ... import tensor_cache as TC
+from ...tensor_cache import tensor_cache as TC
 from ...utils import (
     register_forward_hook_recursively,
     register_full_backward_hook_recursively,

@@ -10,11 +10,10 @@ import socket
 from typing import Callable, Any
 import weakref
 import concurrent.futures
-from .tensor_cache_utils import TensorEqID
 import threading
 import contextlib
-from .logger import logger
-from .tensor_cache_utils import get_oneline_str
+from ..logger import logger
+from .utils import get_oneline_str, TensorEqID
 
 
 def get_process_descriptor() -> str:

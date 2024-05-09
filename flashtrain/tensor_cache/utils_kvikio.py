@@ -1,8 +1,8 @@
 import kvikio
 import cupy
 import torch
-from .logger import logger
-from .tensor_cache_utils import TensorEqID
+from ..logger import logger
+from .utils import TensorEqID
 import concurrent.futures
 import threading
 

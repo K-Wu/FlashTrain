@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing._internal.common_utils import TestCase, run_tests
-from .. import tensor_cache as TC
+from ..tensor_cache import tensor_cache as TC
 import logging
 from ..logger import logger
 from ..utils import (
