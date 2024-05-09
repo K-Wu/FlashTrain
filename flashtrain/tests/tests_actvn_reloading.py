@@ -11,6 +11,8 @@ from ..utils import (
     register_full_backward_hook_recursively,
     register_forward_pre_hook_recursively,
     register_full_backward_pre_hook_recursively,
+    get_sequence_of_layers,
+    register_transpose_of_linear_weights,
 )
 
 
@@ -55,11 +57,14 @@ class SimpleModelTestWithCache(TestCase):
         )
         tensor_cache = TC.TensorCache()
         tensor_cache.add_parameters_from_module(model_withcache)
-        tensor_cache.add_inputs_or_parameters(
-            model_withcache.net1.weight.transpose(0, 1),
-            model_withcache.net2.weight.transpose(0, 1),
-            model_withcache.net3.weight.transpose(0, 1),
-        )
+        if use_recursive_do:
+            register_transpose_of_linear_weights(model_withcache, tensor_cache)
+        else:
+            tensor_cache.add_inputs_or_parameters(
+                model_withcache.net1.weight.transpose(0, 1),
+                model_withcache.net2.weight.transpose(0, 1),
+                model_withcache.net3.weight.transpose(0, 1),
+            )
 
         forward_pre_hook = tensor_cache.get_forward_pre_hook()
         forward_hook = tensor_cache.get_forward_hook()
@@ -154,6 +159,7 @@ class SimpleModelTestWithCache(TestCase):
                 show_attrs=True,
                 show_saved=True,
             ).save("model.dot")
+        print(get_sequence_of_layers(model_withcache))
 
 
 if __name__ == "__main__":
