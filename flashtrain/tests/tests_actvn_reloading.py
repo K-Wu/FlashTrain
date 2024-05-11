@@ -1,9 +1,11 @@
 # The comparison logic is adapted from https://github.com/pytorch/pytorch/blob/fd90991790b4cdf66a076711844ca620669dcc04/test/distributed/tensor/parallel/test_fsdp_2d_parallel.py
+# TODO: rename this script to test_tensor_cache.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.testing._internal.common_utils import TestCase, run_tests
 from ..tensor_cache import tensor_cache as TC
+import torch.utils.checkpoint as checkpoint
 import logging
 from ..logger import logger
 from ..utils import (
@@ -44,7 +46,7 @@ class SimpleModelTestWithCache(TestCase):
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
     def test_e2e_training(
-        self, use_recursive_do=True, debug_viz=False
+        self, use_recursive_do=True, debug_viz=False, use_checkpoint=True
     ) -> None:
         torch.manual_seed(0)
         model = SimpleModel().cuda()
@@ -109,9 +111,10 @@ class SimpleModelTestWithCache(TestCase):
             model_withcache.register_full_backward_hook(backward_hook)
 
         for i in range(5):
-            logger.info(f"iteration {i}")
+            logger.info(f"Iteration {i}")
             # Ensure all input across TP ranks are same.
             # TODO: add a get_group_rank() to DeviceMesh.
+            tensor_cache.set_in_forward()
             torch.manual_seed(i)
             input = torch.rand(4, 5).cuda()
             input_withcache = input.clone().detach()
@@ -139,14 +142,32 @@ class SimpleModelTestWithCache(TestCase):
             loss = output.sum()
             loss.backward()
             optim.step()
+
+            logger.info(f"Iteration {i} now begins the model_withcache")
+
             with torch.autograd.graph.saved_tensors_hooks(
-                pack_hook, unpack_hook
+                pack_hook,
+                unpack_hook,
+                # TC.dummy_pack_hook,
+                # TC.dummy_unpack_hook,
             ):
-                output_withcache = model_withcache(input_withcache)
-                output_withcache.sum().backward()
+                if use_checkpoint:
+                    # Adapted from https://github.com/prigoyal/pytorch_memonger/blob/master/tutorial/Checkpointing_for_PyTorch_models.ipynb
+                    output_withcache = checkpoint.checkpoint(
+                        model_withcache, input, use_reentrant=False
+                    )
+                else:
+                    output_withcache = model_withcache(input_withcache)
+
+                loss_withcache = output_withcache.sum()
+
+                tensor_cache.set_in_backward()
+                loss_withcache.backward()
+
             optim_withcache.step()
             self.assertEqual(output, output_withcache)
-            self.assertEqual(model(input), model_withcache(input))
+        logger.info("Iterations end.")
+        self.assertEqual(model(input), model_withcache(input))
 
         self._compare_params(model, model_withcache)
 
