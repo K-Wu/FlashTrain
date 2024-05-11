@@ -3,7 +3,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.testing._internal.common_utils import TestCase, run_tests
+from torch.testing._internal.common_utils import (
+    TestCase,
+    run_tests,
+    parametrize,
+    instantiate_parametrized_tests,
+)
 from ..tensor_cache import tensor_cache as TC
 import torch.utils.checkpoint as checkpoint
 import logging
@@ -45,6 +50,7 @@ class SimpleModelTestWithCache(TestCase):
                 self.assertTrue(n_p1[0] in n_p2[0])
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
+    @parametrize("use_checkpoint", [True, False])
     def test_e2e_training(
         self, use_recursive_do=True, debug_viz=False, use_checkpoint=True
     ) -> None:
@@ -183,6 +189,7 @@ class SimpleModelTestWithCache(TestCase):
         print(get_sequence_of_layers(model_withcache))
 
 
+instantiate_parametrized_tests(SimpleModelTestWithCache)
 if __name__ == "__main__":
     logger.setLevel(logging.getLevelName("INFO"))
     run_tests()
