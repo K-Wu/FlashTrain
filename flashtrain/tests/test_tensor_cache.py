@@ -1,5 +1,4 @@
 # The comparison logic is adapted from https://github.com/pytorch/pytorch/blob/fd90991790b4cdf66a076711844ca620669dcc04/test/distributed/tensor/parallel/test_fsdp_2d_parallel.py
-# TODO: rename this script to test_tensor_cache.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
