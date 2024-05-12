@@ -204,7 +204,8 @@ class ModuleReentrantContext:
 
 # When micro-batches is employed, we can still use the TensorCache across micro-batches because we don't save parameters, which may change across micro-batches.
 class TensorCache:
-    activation_context_recording: bool
+    enable_activation_context_recording: bool
+    enable_prefetch: bool
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -233,10 +234,14 @@ class TensorCache:
         ModuleReentrantContext | ActivationContext
     ]
     # The order of modules calling forward hook is the reverse of modules calling backward pre hook
-    forward_done_modules: list[ModuleReentrantContext]
+    forward_done_modules: list[ModuleReentrantContext | ActivationContext]
     backward_done_modules: set[ModuleReentrantContext | ActivationContext]
     backward_done_modules_with_cache_to_clear: set[
         ModuleReentrantContext | ActivationContext
+    ]
+    orevious_module_to_next_module: dict[
+        ModuleReentrantContext | ActivationContext,
+        ModuleReentrantContext | ActivationContext,
     ]
 
     # In forward propagation, weak ref to tensor are dictionary values to allow the tensor to be garbage collected.
@@ -262,8 +267,13 @@ class TensorCache:
 
     current_in_backward: bool
 
-    def __init__(self, activation_context_recording=False):
-        self.activation_context_recording = activation_context_recording
+    def __init__(
+        self, enable_activation_context_recording=False, enable_prefetch=True
+    ):
+        self.enable_activation_context_recording = (
+            enable_activation_context_recording
+        )
+        self.enable_prefetch = enable_prefetch
         self.module_id_to_tensor_ids = {}
         self.tensor_id_to_module_ids = {}
 
@@ -278,6 +288,7 @@ class TensorCache:
         self.forward_done_modules = []
         self.backward_done_modules = set()
         self.backward_done_modules_with_cache_to_clear = set()
+        self.next_module_to_previous_module = {}
 
         self.tensor_id_to_tensor_to_store = {}
         self.tensor_id_to_filename_and_metadata = {}
@@ -329,45 +340,48 @@ class TensorCache:
         )
 
     def set_in_forward(self):
-        """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is only needed when activation context recording is enabled."""
-        assert self.activation_context_recording
-        # Check if there is left-over activation region to clear up.
-        if self.current_in_backward:
-            activation_context = (
-                self.check_done_activation_context_in_backward(None)
-            )
-            if activation_context:
-                with self.lock:
-                    self.backward_done_modules.add(activation_context)
-                    self.backward_done_modules_with_cache_to_clear.add(
-                        activation_context
-                    )
-            if len(self.backward_done_modules_with_cache_to_clear) > 0:
-                self.clear_up_done_backward_modules_cache()
+        """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is a must when activation context recording is enabled."""
+        if self.enable_activation_context_recording:
+            # Except for the first forward pass, we are in the backward pass and need to do clear up.
+            if self.current_in_backward:
+                # Check if there is left-over activation region to clear up.
+                activation_context = (
+                    self.check_done_activation_context_in_backward(None)
+                )
+                if activation_context:
+                    with self.lock:
+                        self.backward_done_modules.add(activation_context)
+                        self.backward_done_modules_with_cache_to_clear.add(
+                            activation_context
+                        )
+                if len(self.backward_done_modules_with_cache_to_clear) > 0:
+                    self.clear_up_done_backward_modules_cache()
 
-            # Clear all the data structures that are only used in the previous backward pass.
-            self.forward_done_modules.clear()
+                self.activation_checkpoint_counter = 0
+                self.activation_checkpoints.clear()
+                self.activation_checkpoint_to_module_id.clear()
+                self.previous_module_to_activation_context.clear()
 
-            self.activation_checkpoint_counter = 0
-            self.activation_checkpoints.clear()
-            self.activation_checkpoint_to_module_id.clear()
-            self.previous_module_to_activation_context.clear()
-            self.backward_done_modules.clear()
-
+        # Clear all the data structures that are only used in the previous backward pass.
+        self.forward_done_modules.clear()
+        self.backward_done_modules.clear()
         logger.info("Set current_in_backward flag to False")
         self.current_in_backward = False
 
     def set_in_backward(self):
-        """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is only needed when activation context recording is enabled."""
-        assert self.activation_context_recording
-
-        self.update_current_activation_context_in_forward()
+        """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
+        if self.enable_activation_context_recording:
+            self.update_current_activation_context_in_forward()
         self.forward_module_scope_stack.clear()
+        self.next_module_to_previous_module = {
+            self.forward_done_modules[idx + 1]: self.forward_done_modules[idx]
+            for idx in range(len(self.forward_done_modules) - 1)
+        }
         logger.info("Set current_in_backward flag to True")
         self.current_in_backward = True
 
     def update_current_activation_context_in_forward(self):
-        assert self.activation_context_recording
+        assert self.enable_activation_context_recording
 
         assert not self.current_in_backward
         if is_torch_activation_checkpoint_in_traceback():
@@ -434,6 +448,9 @@ class TensorCache:
             if not self.current_activation_context is None:
                 # We exit an activation checkpoint region.
                 self.current_activation_context = None
+                self.forward_done_modules.append(
+                    self.forward_module_scope_stack[-1]
+                )
                 self.forward_module_scope_stack.pop()
 
     def check_done_activation_context_in_backward(
@@ -441,7 +458,7 @@ class TensorCache:
     ) -> None | ActivationContext:
         # In backward propagation, the checkpoint region is triggered if any of its module within it is triggered or any of the tensor within it is unpacked. To detect this, we need to maintain dictionary mapping from module id (+reentrent) to activation context and from tensor to activation context. This is not needed because there is no need to maintain which activation context we are currently in when we are in the backward pass, but only which activation context we have done.
         """In backward propagation, the checkpoint region is done after all modules within it are done and the backward process of the previous (in forward propagation) layer is triggered. To detect this, we need to maintain activation context to modules and previous-module to activation context."""
-        assert self.activation_context_recording
+        assert self.enable_activation_context_recording
 
         assert self.current_in_backward
         if backward_pre_hook_target:
@@ -464,12 +481,44 @@ class TensorCache:
                     return None
             return activation_context
 
-    # TODO: use post-order traversal to do prefetch
+    def prefetch_next_module_in_backward(
+        self, backward_pre_hook_target: torch.nn.Module
+    ) -> None:
+        """Use post-order traversal to do prefetch according to forward_done_modules"""
+        if len(self.next_module_to_previous_module) == 0:
+            logger.warning(
+                "Producing next_module_to_previous_module. It is recommended"
+                " to call set_in_backward() before calling"
+                " prefetch_next_module_in_backward()."
+            )
+            self.next_module_to_previous_module = {
+                self.forward_done_modules[idx + 1]: self.forward_done_modules[
+                    idx
+                ]
+                for idx in range(len(self.forward_done_modules) - 1)
+            }
+        if backward_pre_hook_target:
+            backward_pre_module = ModuleReentrantContext(
+                module_id=id(backward_pre_hook_target),
+                reenter_count=self.module_id_to_reenter_count.get(
+                    id(backward_pre_hook_target), 0
+                ),
+            )
+            if backward_pre_module in self.next_module_to_previous_module:
+                module_to_prefetch = self.next_module_to_previous_module[
+                    backward_pre_module
+                ]
+                if module_to_prefetch in self.module_id_to_tensor_ids:
+                    logger.info(
+                        "Prefetching tensors in backward pre hook"
+                        f" {module_to_prefetch}"
+                    )
+                    self.prefetch_saved_tensors(module_to_prefetch)
 
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
         def forward_pre_hook(m, inputs) -> None:
-            if self.activation_context_recording:
+            if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
                     self.update_current_activation_context_in_forward()
@@ -532,7 +581,7 @@ class TensorCache:
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, inputs, outputs) -> None:
-            if self.activation_context_recording:
+            if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
                     logger.info(
@@ -563,7 +612,7 @@ class TensorCache:
             logger.info(
                 f"Full backward pre hook for ({id(m)}) {get_oneline_str(m)}"
             )
-            if self.activation_context_recording:
+            if self.enable_activation_context_recording:
                 activation_context = (
                     self.check_done_activation_context_in_backward(m)
                 )
@@ -573,6 +622,8 @@ class TensorCache:
                         self.backward_done_modules_with_cache_to_clear.add(
                             activation_context
                         )
+            if self.enable_prefetch:
+                self.prefetch_next_module_in_backward(m)
 
         return full_backward_pre_hook
 
@@ -644,7 +695,7 @@ class TensorCache:
                     f"Tensor cache skips packing CPU tensor {tensor_id}"
                 )
                 return tensor
-            if self.activation_context_recording:
+            if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
                     logger.info(
@@ -705,7 +756,7 @@ class TensorCache:
         def unpack_hook(
             tensor_id_or_tensor: TensorEqID | torch.Tensor,
         ) -> torch.Tensor:
-            if self.activation_context_recording:
+            if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
                     self.update_current_activation_context_in_forward()
@@ -808,15 +859,10 @@ class TensorCache:
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.
         return
 
-    def prefetch_saved_tensors(self, module: torch.nn.Module) -> None:
-        tensor_ids = self.module_id_to_tensor_ids[
-            ModuleReentrantContext(
-                module_id=id(module),
-                reenter_count=self.module_id_to_reenter_count.get(
-                    id(module), 0
-                ),
-            )
-        ]
+    def prefetch_saved_tensors(
+        self, module_id: ModuleReentrantContext | ActivationContext
+    ) -> None:
+        tensor_ids = self.module_id_to_tensor_ids[module_id]
         for tensor_id in tensor_ids:
             # We need to ensure thread-safety during the backward pass.
             with self.lock:

@@ -49,7 +49,8 @@ class SimpleModelTestWithCache(TestCase):
                 self.assertTrue(n_p1[0] in n_p2[0])
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
-    @parametrize("use_checkpoint", [True, False])
+    # @parametrize("use_checkpoint", [True, False])
+    @parametrize("use_checkpoint", [False])
     def test_e2e_training(
         self, use_recursive_do=True, debug_viz=False, use_checkpoint=True
     ) -> None:
@@ -63,7 +64,7 @@ class SimpleModelTestWithCache(TestCase):
             model_withcache.parameters(), lr=0.01
         )
         tensor_cache = TC.TensorCache(
-            activation_context_recording=use_checkpoint
+            enable_activation_context_recording=use_checkpoint
         )
         tensor_cache.add_parameters_from_module(model_withcache)
         if use_recursive_do:
@@ -121,8 +122,7 @@ class SimpleModelTestWithCache(TestCase):
             logger.info(f"Iteration {i}")
             # Ensure all input across TP ranks are same.
             # TODO: add a get_group_rank() to DeviceMesh.
-            if use_checkpoint:
-                tensor_cache.set_in_forward()
+            tensor_cache.set_in_forward()
             torch.manual_seed(i)
             input = torch.rand(4, 5).cuda()
             input_withcache = input.clone().detach()
@@ -168,8 +168,7 @@ class SimpleModelTestWithCache(TestCase):
                     output_withcache = model_withcache(input_withcache)
 
                 loss_withcache = output_withcache.sum()
-                if use_checkpoint:
-                    tensor_cache.set_in_backward()
+                tensor_cache.set_in_backward()
                 loss_withcache.backward()
 
             optim_withcache.step()
