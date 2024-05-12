@@ -62,7 +62,9 @@ class SimpleModelTestWithCache(TestCase):
         optim_withcache = torch.optim.Adam(
             model_withcache.parameters(), lr=0.01
         )
-        tensor_cache = TC.TensorCache()
+        tensor_cache = TC.TensorCache(
+            activation_context_recording=use_checkpoint
+        )
         tensor_cache.add_parameters_from_module(model_withcache)
         if use_recursive_do:
             register_transpose_of_linear_weights(model_withcache, tensor_cache)
@@ -119,7 +121,8 @@ class SimpleModelTestWithCache(TestCase):
             logger.info(f"Iteration {i}")
             # Ensure all input across TP ranks are same.
             # TODO: add a get_group_rank() to DeviceMesh.
-            tensor_cache.set_in_forward()
+            if use_checkpoint:
+                tensor_cache.set_in_forward()
             torch.manual_seed(i)
             input = torch.rand(4, 5).cuda()
             input_withcache = input.clone().detach()
@@ -140,7 +143,7 @@ class SimpleModelTestWithCache(TestCase):
             }
             assert (
                 TC.TensorEqID.from_tensor(input_withcache)
-                in tensor_cache.parameters
+                in tensor_cache.parameters_and_inputs
             )
 
             output = model(input)
@@ -165,8 +168,8 @@ class SimpleModelTestWithCache(TestCase):
                     output_withcache = model_withcache(input_withcache)
 
                 loss_withcache = output_withcache.sum()
-
-                tensor_cache.set_in_backward()
+                if use_checkpoint:
+                    tensor_cache.set_in_backward()
                 loss_withcache.backward()
 
             optim_withcache.step()

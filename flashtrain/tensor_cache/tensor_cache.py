@@ -188,7 +188,6 @@ def dummy_unpack_hook(tensor):
     return tensor
 
 
-# TODO: Add reentrant function context containing module_id and counter int. Name it as ModuleReentrantContext. Replace int | tuple[int, int] with ModuleReentrantContext.
 @dataclass(frozen=True)
 class ActivationContext:
     sequence_id: int
@@ -197,17 +196,25 @@ class ActivationContext:
     caller_lineno: int
 
 
+@dataclass(frozen=True)
+class ModuleReentrantContext:
+    module_id: int
+    reenter_count: int
+
+
 # When micro-batches is employed, we can still use the TensorCache across micro-batches because we don't save parameters, which may change across micro-batches.
 class TensorCache:
+    activation_context_recording: bool
+
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
-    parameters: set[TensorEqID]
+    parameters_and_inputs: set[TensorEqID]
 
     # We store the id of module to avoid affecting the garbage collection of module.
     module_id_to_tensor_ids: dict[
-        int | tuple[int, int] | ActivationContext, set[TensorEqID]
+        ModuleReentrantContext | ActivationContext, set[TensorEqID]
     ]
     tensor_id_to_module_ids: dict[
-        TensorEqID, set[int | tuple[int, int] | ActivationContext]
+        TensorEqID, set[ModuleReentrantContext | ActivationContext]
     ]
 
     module_id_to_module: dict[int, weakref.ref[torch.nn.Module]]
@@ -217,17 +224,19 @@ class TensorCache:
     current_activation_context: ActivationContext | None
     activation_checkpoints: list[ActivationContext]
     activation_checkpoint_to_module_id: dict[
-        ActivationContext, set[int | tuple[int, int]]
+        ActivationContext, set[ModuleReentrantContext]
     ]
     previous_module_to_activation_context: dict[
-        int | tuple[int, int] | None, ActivationContext
+        ModuleReentrantContext | None, ActivationContext
     ]
-    forward_module_scope_stack: list[int | tuple[int, int] | ActivationContext]
+    forward_module_scope_stack: list[
+        ModuleReentrantContext | ActivationContext
+    ]
     # The order of modules calling forward hook is the reverse of modules calling backward pre hook
-    forward_done_modules: list[int | tuple[int, int]]
-    backward_done_modules: set[int | tuple[int, int] | ActivationContext]
+    forward_done_modules: list[ModuleReentrantContext]
+    backward_done_modules: set[ModuleReentrantContext | ActivationContext]
     backward_done_modules_with_cache_to_clear: set[
-        int | tuple[int, int] | ActivationContext
+        ModuleReentrantContext | ActivationContext
     ]
 
     # In forward propagation, weak ref to tensor are dictionary values to allow the tensor to be garbage collected.
@@ -253,7 +262,8 @@ class TensorCache:
 
     current_in_backward: bool
 
-    def __init__(self):
+    def __init__(self, activation_context_recording=False):
+        self.activation_context_recording = activation_context_recording
         self.module_id_to_tensor_ids = {}
         self.tensor_id_to_module_ids = {}
 
@@ -281,7 +291,7 @@ class TensorCache:
 
         self.lock = threading.Lock()
 
-        self.parameters = set()
+        self.parameters_and_inputs = set()
 
         self.adapter = TorchBuiltinIOAdapter()
 
@@ -292,7 +302,7 @@ class TensorCache:
         self.executor.shutdown()
 
     def add_parameters_from_module(self, model: torch.nn.Module):
-        self.parameters = self.parameters.union(
+        self.parameters_and_inputs = self.parameters_and_inputs.union(
             {TensorEqID.from_tensor(p.data) for p in model.parameters()}
         )
         logger.info(
@@ -301,7 +311,7 @@ class TensorCache:
         )
 
     def add_inputs_or_parameters(self, *inputs: torch.Tensor):
-        self.parameters = self.parameters.union(
+        self.parameters_and_inputs = self.parameters_and_inputs.union(
             {TensorEqID.from_tensor(input) for input in inputs}
         )
         logger.info(
@@ -310,7 +320,7 @@ class TensorCache:
         )
 
     def del_inputs_or_parameters(self, *inputs: torch.Tensor):
-        self.parameters = self.parameters.difference(
+        self.parameters_and_inputs = self.parameters_and_inputs.difference(
             {TensorEqID.from_tensor(input) for input in inputs}
         )
         logger.info(
@@ -319,7 +329,8 @@ class TensorCache:
         )
 
     def set_in_forward(self):
-        """Set this flag to indicate that the runtime is in forward pass."""
+        """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is only needed when activation context recording is enabled."""
+        assert self.activation_context_recording
         # Check if there is left-over activation region to clear up.
         if self.current_in_backward:
             activation_context = (
@@ -347,13 +358,17 @@ class TensorCache:
         self.current_in_backward = False
 
     def set_in_backward(self):
-        """Set this flag to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation."""
+        """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is only needed when activation context recording is enabled."""
+        assert self.activation_context_recording
+
         self.update_current_activation_context_in_forward()
         self.forward_module_scope_stack.clear()
         logger.info("Set current_in_backward flag to True")
         self.current_in_backward = True
 
     def update_current_activation_context_in_forward(self):
+        assert self.activation_context_recording
+
         assert not self.current_in_backward
         if is_torch_activation_checkpoint_in_traceback():
             (
@@ -426,18 +441,16 @@ class TensorCache:
     ) -> None | ActivationContext:
         # In backward propagation, the checkpoint region is triggered if any of its module within it is triggered or any of the tensor within it is unpacked. To detect this, we need to maintain dictionary mapping from module id (+reentrent) to activation context and from tensor to activation context. This is not needed because there is no need to maintain which activation context we are currently in when we are in the backward pass, but only which activation context we have done.
         """In backward propagation, the checkpoint region is done after all modules within it are done and the backward process of the previous (in forward propagation) layer is triggered. To detect this, we need to maintain activation context to modules and previous-module to activation context."""
+        assert self.activation_context_recording
+
         assert self.current_in_backward
         if backward_pre_hook_target:
-            if id(backward_pre_hook_target) in self.module_id_to_reenter_count:
-                backward_pre_module = (
-                    id(backward_pre_hook_target),
-                    self.module_id_to_reenter_count[
-                        id(backward_pre_hook_target)
-                    ],
-                )
-
-            else:
-                backward_pre_module = id(backward_pre_hook_target)
+            backward_pre_module = ModuleReentrantContext(
+                module_id=id(backward_pre_hook_target),
+                reenter_count=self.module_id_to_reenter_count.get(
+                    id(backward_pre_hook_target), 0
+                ),
+            )
         else:
             backward_pre_module = None
         if backward_pre_module in self.previous_module_to_activation_context:
@@ -456,17 +469,17 @@ class TensorCache:
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
         def forward_pre_hook(m, inputs) -> None:
-            if not self.current_in_backward:
-                # First, update the current ActivationContext
-                self.update_current_activation_context_in_forward()
-
-            if self.current_in_backward:
-                logger.info(
-                    "Skipping forward pre hook, in the backward propagation"
-                    " to avoid issue in activation recomputation, of"
-                    f" {get_oneline_str(m)}({id(m)})"
-                )
-                return
+            if self.activation_context_recording:
+                if not self.current_in_backward:
+                    # First, update the current ActivationContext
+                    self.update_current_activation_context_in_forward()
+                else:
+                    logger.info(
+                        "Skipping forward pre hook, in the backward"
+                        " propagation to avoid issue in activation"
+                        f" recomputation, of {get_oneline_str(m)}({id(m)})"
+                    )
+                    return
 
             logger.info(
                 f"Forward pre hook for {get_oneline_str(m)}, is Linear:"
@@ -476,7 +489,9 @@ class TensorCache:
 
             if id(m) not in self.module_id_to_module:
                 # The runtime is to do the forward logic within module m.
-                self.forward_module_scope_stack.append(id(m))
+                self.forward_module_scope_stack.append(
+                    ModuleReentrantContext(module_id=id(m), reenter_count=0)
+                )
                 self.module_id_to_module[id(m)] = weakref.ref(m)
             else:
                 logger.warning(
@@ -489,7 +504,10 @@ class TensorCache:
                     + 1
                 )
                 self.forward_module_scope_stack.append(
-                    (id(m), self.module_id_to_reenter_count[id(m)])
+                    ModuleReentrantContext(
+                        module_id=id(m),
+                        reenter_count=self.module_id_to_reenter_count[id(m)],
+                    )
                 )
             if (
                 self.forward_module_scope_stack[-1]
@@ -514,28 +532,25 @@ class TensorCache:
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, inputs, outputs) -> None:
-            if self.current_in_backward:
-                # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
-                logger.info(
-                    "Skipping forward hook, in the backward propagation to"
-                    " avoid issue in activation recomputation, for"
-                    f" {get_oneline_str(m)}({id(m)})"
-                )
-                return
-            else:
-                # First, update the current ActivationContext
-                self.update_current_activation_context_in_forward()
+            if self.activation_context_recording:
+                if self.current_in_backward:
+                    # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
+                    logger.info(
+                        "Skipping forward hook, in the backward propagation to"
+                        " avoid issue in activation recomputation, for"
+                        f" {get_oneline_str(m)}({id(m)})"
+                    )
+                    return
+                else:
+                    # First, update the current ActivationContext
+                    self.update_current_activation_context_in_forward()
 
             logger.info(f"Forward hook for {get_oneline_str(m)}({id(m)})")
             # The runtime has finished the forward logic within module m.
-            if isinstance(self.forward_module_scope_stack[-1], tuple):
-                # Reenterred context
-                assert self.forward_module_scope_stack[-1][0] == id(m)
-            else:
-                assert self.forward_module_scope_stack[-1] == id(m)
             assert not isinstance(
                 self.forward_module_scope_stack[-1], ActivationContext
             )
+            assert self.forward_module_scope_stack[-1].module_id == id(m)
             self.forward_done_modules.append(
                 self.forward_module_scope_stack[-1]
             )
@@ -548,16 +563,16 @@ class TensorCache:
             logger.info(
                 f"Full backward pre hook for ({id(m)}) {get_oneline_str(m)}"
             )
-
-            activation_context = (
-                self.check_done_activation_context_in_backward(m)
-            )
-            if activation_context:
-                with self.lock:
-                    self.backward_done_modules.add(activation_context)
-                    self.backward_done_modules_with_cache_to_clear.add(
-                        activation_context
-                    )
+            if self.activation_context_recording:
+                activation_context = (
+                    self.check_done_activation_context_in_backward(m)
+                )
+                if activation_context:
+                    with self.lock:
+                        self.backward_done_modules.add(activation_context)
+                        self.backward_done_modules_with_cache_to_clear.add(
+                            activation_context
+                        )
 
         return full_backward_pre_hook
 
@@ -581,18 +596,36 @@ class TensorCache:
                 if id(m) in self.module_id_to_reenter_count:
                     # This module is reentered. We need to clean the cache of the corresponding reentered context rather than the first context.
                     self.backward_done_modules.add(
-                        (id(m), self.module_id_to_reenter_count[id(m)])
+                        ModuleReentrantContext(
+                            module_id=id(m),
+                            reenter_count=self.module_id_to_reenter_count[
+                                id(m)
+                            ],
+                        )
                     )
                     self.backward_done_modules_with_cache_to_clear.add(
-                        (id(m), self.module_id_to_reenter_count[id(m)])
+                        ModuleReentrantContext(
+                            module_id=id(m),
+                            reenter_count=self.module_id_to_reenter_count[
+                                id(m)
+                            ],
+                        )
                     )
                     self.module_id_to_reenter_count[id(m)] -= 1
                     if self.module_id_to_reenter_count[id(m)] == 0:
                         del self.module_id_to_reenter_count[id(m)]
                 else:
                     # The runtime has finished the backward logic within module m.
-                    self.backward_done_modules.add(id(m))
-                    self.backward_done_modules_with_cache_to_clear.add(id(m))
+                    self.backward_done_modules.add(
+                        ModuleReentrantContext(
+                            module_id=id(m), reenter_count=0
+                        )
+                    )
+                    self.backward_done_modules_with_cache_to_clear.add(
+                        ModuleReentrantContext(
+                            module_id=id(m), reenter_count=0
+                        )
+                    )
             self.clear_up_done_backward_modules_cache()
 
         return full_backward_hook
@@ -611,21 +644,22 @@ class TensorCache:
                     f"Tensor cache skips packing CPU tensor {tensor_id}"
                 )
                 return tensor
-            if self.current_in_backward:
-                # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
-                logger.info(
-                    "Tensor cache skips packing in backward propagation"
-                    f" {tensor_id}"
-                )
-                return tensor
-            else:
-                # First, update the current ActivationContext
-                self.update_current_activation_context_in_forward()
+            if self.activation_context_recording:
+                if self.current_in_backward:
+                    # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
+                    logger.info(
+                        "Tensor cache skips packing in backward propagation"
+                        f" {tensor_id}"
+                    )
+                    return tensor
+                else:
+                    # First, update the current ActivationContext
+                    self.update_current_activation_context_in_forward()
 
             # We need to ensure thread-safety.
             with self.lock:
                 # Skip parameters because they will stay in memory always.
-                if tensor_id in self.parameters:
+                if tensor_id in self.parameters_and_inputs:
                     logger.info(f"Tensor cache skips packing {tensor_id}")
                     return tensor
                 logger.info(f"Packing {tensor_id}, {tensor.shape}")
@@ -671,20 +705,21 @@ class TensorCache:
         def unpack_hook(
             tensor_id_or_tensor: TensorEqID | torch.Tensor,
         ) -> torch.Tensor:
-            if not self.current_in_backward:
-                # First, update the current ActivationContext
-                self.update_current_activation_context_in_forward()
+            if self.activation_context_recording:
+                if not self.current_in_backward:
+                    # First, update the current ActivationContext
+                    self.update_current_activation_context_in_forward()
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
                 # Skip parameters because they will stay in memory always.
                 if isinstance(tensor_id_or_tensor, torch.Tensor):
                     if (
                         TensorEqID.from_tensor(tensor_id_or_tensor)
-                        in self.parameters
+                        in self.parameters_and_inputs
                     ):
-                        # TODO: rename self.parameters to self.parameters_and_inputs
                         logger.info(
-                            "Tensor cache skips unpacking, due to parameters,"
+                            "Tensor cache skips unpacking, due to parameters"
+                            " and inputs,"
                             f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
                             f" {tensor_id_or_tensor.shape}"
                         )
@@ -731,12 +766,14 @@ class TensorCache:
         """
         Get the saved tensors for backward in the forward pass.
         """
-        if id(module) in self.module_id_to_reenter_count:
-            tensor_ids = self.module_id_to_tensor_ids[
-                (id(module), self.module_id_to_reenter_count[id(module)])
-            ]
-        else:
-            tensor_ids = self.module_id_to_tensor_ids[id(module)]
+        tensor_ids = self.module_id_to_tensor_ids[
+            ModuleReentrantContext(
+                module_id=id(module),
+                reenter_count=self.module_id_to_reenter_count.get(
+                    id(module), 0
+                ),
+            )
+        ]
         for tensor_id in tensor_ids:
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -772,12 +809,14 @@ class TensorCache:
         return
 
     def prefetch_saved_tensors(self, module: torch.nn.Module) -> None:
-        if id(module) in self.module_id_to_reenter_count:
-            tensor_ids = self.module_id_to_tensor_ids[
-                (id(module), self.module_id_to_reenter_count[id(module)])
-            ]
-        else:
-            tensor_ids = self.module_id_to_tensor_ids[id(module)]
+        tensor_ids = self.module_id_to_tensor_ids[
+            ModuleReentrantContext(
+                module_id=id(module),
+                reenter_count=self.module_id_to_reenter_count.get(
+                    id(module), 0
+                ),
+            )
+        ]
         for tensor_id in tensor_ids:
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
