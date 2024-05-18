@@ -3,7 +3,10 @@ pulp
 numpy
 attrs
 tqdm
-transformers
+transformers==4.39.3
 recordclass
-accelerate
+accelerate==0.30.0
 torchviz
+datasets==2.19.1
+deepspeed==0.14.2
+nltk

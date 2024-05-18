@@ -4,7 +4,16 @@
 [![DeepSource](https://app.deepsource.com/gh/K-Wu/FlashTrain.svg/?label=active+issues&show_trend=true&token=d7YCxKKgZgyhjlQrCMVkugyJ)](https://app.deepsource.com/gh/K-Wu/FlashTrain/)
 
 ## Dependencies
-[Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
+
+### Installing apex
+Follow the instruction [here](https://github.com/NVIDIA/apex?tab=readme-ov-file#linux) to install from source. Do not install apex via pip directly because the megatron code dependent on apex won't work in this case.
+
+## Installing Megatron-DeepSpeed
+Go to third_party/Megatron-DeepSpeed and follow the instruction to install Megatron-DeepSpeed from source.
+
+### Installing Kvikio
+Check [Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
+
 
 ## Contact
 Kun Wu kunwu2 (at) illinois (dot) edu  [![wakatime](https://wakatime.com/badge/github/K-Wu/FlashTrain.svg)](https://wakatime.com/badge/github/K-Wu/FlashTrain)
