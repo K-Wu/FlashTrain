@@ -13,8 +13,10 @@ class KvikioIOAdapter:
         """
         Save the tensor to the file.
         """
-        tensor_cupy = cupy.asarray(tensor)
-        with kvikio.CuFile(path, "r") as f:
+        # tensor_cupy = cupy.asarray(tensor)
+        # Issue at https://github.com/cupy/cupy/issues/7144
+        tensor_cupy = cupy.from_dlpack(tensor.detach())
+        with kvikio.CuFile(path, "w") as f:
             f.write(tensor_cupy)
         logger.info(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
 

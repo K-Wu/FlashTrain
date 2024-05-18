@@ -53,6 +53,7 @@ class TorchBuiltinIOAdapter:
         torch.save(tensor, path)
         logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)} to {path}")
 
+    # TODO: return error code
     @classmethod
     def async_save_tensor(
         cls,
@@ -268,7 +269,10 @@ class TensorCache:
     current_in_backward: bool
 
     def __init__(
-        self, enable_activation_context_recording=False, enable_prefetch=True
+        self,
+        enable_activation_context_recording=False,
+        enable_prefetch=True,
+        adapter: TorchBuiltinIOAdapter | Any = None,
     ):
         self.enable_activation_context_recording = (
             enable_activation_context_recording
@@ -304,7 +308,10 @@ class TensorCache:
 
         self.parameters_and_inputs = set()
 
-        self.adapter = TorchBuiltinIOAdapter()
+        if adapter is not None:
+            self.adapter = adapter
+        else:
+            self.adapter = TorchBuiltinIOAdapter()
 
         self.current_in_backward = False
 
@@ -740,7 +747,7 @@ class TensorCache:
                     self.forward_module_scope_stack[-1]
                 )
                 logger.info(
-                    f"Recording tensor {tensor_id} being used in module"
+                    f"Recording tensor {tensor_id} in module"
                     f" {self.forward_module_scope_stack[-1]}"
                 )
                 self.module_id_to_tensor_ids[

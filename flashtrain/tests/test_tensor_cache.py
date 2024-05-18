@@ -9,6 +9,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
 )
 from ..tensor_cache import tensor_cache as TC
+from ..tensor_cache import adapters
 import torch.utils.checkpoint as checkpoint
 import logging
 from ..logger import logger
@@ -49,10 +50,14 @@ class SimpleModelTestWithCache(TestCase):
                 self.assertTrue(n_p1[0] in n_p2[0])
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
-    # @parametrize("use_checkpoint", [True, False])
-    @parametrize("use_checkpoint", [False])
+    @parametrize("use_checkpoint", [True, False])
+    @parametrize("adapter_type", ["native", "main_memory", "kvikio"])
     def test_e2e_training(
-        self, use_recursive_do=True, debug_viz=False, use_checkpoint=True
+        self,
+        use_recursive_do=True,
+        debug_viz=False,
+        use_checkpoint=True,
+        adapter_type="kvikio",
     ) -> None:
         torch.manual_seed(0)
         model = SimpleModel().cuda()
@@ -63,9 +68,21 @@ class SimpleModelTestWithCache(TestCase):
         optim_withcache = torch.optim.Adam(
             model_withcache.parameters(), lr=0.01
         )
-        tensor_cache = TC.TensorCache(
-            enable_activation_context_recording=use_checkpoint
-        )
+        if adapter_type == "main_memory":
+            tensor_cache = TC.TensorCache(
+                enable_activation_context_recording=use_checkpoint,
+                adapter=adapters.TorchMainMemoryIOAdapter(),
+            )
+        elif adapter_type == "kvikio":
+            tensor_cache = TC.TensorCache(
+                enable_activation_context_recording=use_checkpoint,
+                adapter=adapters.KvikioIOAdapter(),
+            )
+        else:
+            assert adapter_type == "native"
+            tensor_cache = TC.TensorCache(
+                enable_activation_context_recording=use_checkpoint,
+            )
         tensor_cache.add_parameters_from_module(model_withcache)
         if use_recursive_do:
             register_transpose_of_linear_weights(model_withcache, tensor_cache)
