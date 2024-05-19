@@ -15,6 +15,7 @@ import contextlib
 import traceback
 from ..logger import logger
 from .utils import get_oneline_str, TensorEqID
+from .adapters import create_new_filename
 from dataclasses import dataclass
 
 
@@ -25,28 +26,23 @@ def get_process_descriptor() -> str:
         return f"{socket.gethostname()}"
 
 
-def get_filename(
-    identifier: str,  # Used to distinguish tensors among distributed processes.
-    tensor: torch.Tensor,
-    path: str = "/tmp",
-) -> str:
-    """
-    Get the filename of the tensor on the device.
-
-    TODO: add support for storing different devices' tensors in different directories.
-    """
-    # Use TensorEqID instead of id(tensor) because id(tensor) collision may happen when the data pointers of the two different tensors are the same.
-    return os.path.join(
-        path,
-        (
-            f"{identifier}_{TensorEqID.from_tensor(tensor)}_{str(tensor.device).replace(':', '_')}.pt"
-        ),
-    )
-
-
 class TorchBuiltinIOAdapter:
-    @classmethod
-    def save_tensor(cls, tensor: torch.Tensor, path: str):
+    path: str
+
+    def __init__(self, path: str = "/tmp"):
+        self.path = path
+
+    def create_new_filename(
+        self,
+        identifier: str,  # Used to distinguish tensors among distributed processes.
+        tensor: torch.Tensor,
+    ):
+        """
+        Create a filename for a new file when storing tensor on the device.
+        """
+        return create_new_filename(identifier, tensor, self.path)
+
+    def save_tensor(self, tensor: torch.Tensor, path: str):
         """
         Save the tensor to the file.
         """
@@ -54,9 +50,8 @@ class TorchBuiltinIOAdapter:
         logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)} to {path}")
 
     # TODO: return error code
-    @classmethod
     def async_save_tensor(
-        cls,
+        self,
         tensor: torch.Tensor,
         path: str,
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
@@ -69,9 +64,8 @@ class TorchBuiltinIOAdapter:
         with lock:
             del tensor_being_stored[TensorEqID.from_tensor(tensor)]
 
-    @classmethod
     def load_tensor(
-        cls,
+        self,
         path: str,
         shape: torch.Size,
         dtype: torch.dtype,
@@ -85,9 +79,8 @@ class TorchBuiltinIOAdapter:
         logger.info(f"Loading tensor from path {path}")
         return torch.load(path)
 
-    @classmethod
     def async_load_tensor(
-        cls,
+        self,
         path: str,
         shape: torch.Size,
         dtype: torch.dtype,
@@ -105,9 +98,8 @@ class TorchBuiltinIOAdapter:
             tensor_id_to_loaded_tensor[tensor_id] = torch.load(path)
             del tensor_being_loaded[tensor_id]
 
-    @classmethod
     def clean_up_in_backward(
-        cls,
+        self,
         path: str,
         shape: torch.Size,
         dtype: torch.dtype,
@@ -426,9 +418,9 @@ class TensorCache:
             self.activation_checkpoint_to_module_id[
                 self.current_activation_context
             ] = set()
-            self.module_id_to_tensor_ids[
-                self.current_activation_context
-            ] = set()
+            self.module_id_to_tensor_ids[self.current_activation_context] = (
+                set()
+            )
             logger.info(
                 "Adding activation context"
                 f" {self.current_activation_context} into"
@@ -444,9 +436,9 @@ class TensorCache:
                 previous_module
                 not in self.previous_module_to_activation_context
             )
-            self.previous_module_to_activation_context[
-                previous_module
-            ] = self.current_activation_context
+            self.previous_module_to_activation_context[previous_module] = (
+                self.current_activation_context
+            )
             self.forward_module_scope_stack.append(
                 self.current_activation_context
             )
@@ -726,7 +718,9 @@ class TensorCache:
                         f"Adding tensor {tensor_id} into tensor to store"
                     )
                     self.tensor_id_to_filename_and_metadata[tensor_id] = (
-                        get_filename(get_process_descriptor(), tensor),
+                        self.adapter.create_new_filename(
+                            get_process_descriptor(), tensor
+                        ),
                         tensor.shape,
                         tensor.dtype,
                         tensor.device,
@@ -847,21 +841,21 @@ class TensorCache:
                             self.tensor_being_loaded[tensor_id].result()
                         else:
                             # Blocking load the tensor from the file.
-                            self.tensor_id_to_loaded_tensor[
-                                tensor_id
-                            ] = self.adapter.load_tensor(
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][0],
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][1],
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][2],
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][3],
+                            self.tensor_id_to_loaded_tensor[tensor_id] = (
+                                self.adapter.load_tensor(
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][0],
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][1],
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][2],
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][3],
+                                )
                             )
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.
         return
@@ -882,26 +876,26 @@ class TensorCache:
                     else:  # The tensor is not in memory.
                         if not tensor_id in self.tensor_being_loaded:
                             # The tensor is not being prefetched. Prefetch the tensor.
-                            self.tensor_being_loaded[
-                                tensor_id
-                            ] = self.executor.submit(
-                                self.adapter.async_load_tensor,
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][0],
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][1],
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][2],
-                                self.tensor_id_to_filename_and_metadata[
-                                    tensor_id
-                                ][3],
-                                self.tensor_id_to_loaded_tensor,
-                                tensor_id,
-                                self.tensor_being_loaded,
-                                self.lock,
+                            self.tensor_being_loaded[tensor_id] = (
+                                self.executor.submit(
+                                    self.adapter.async_load_tensor,
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][0],
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][1],
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][2],
+                                    self.tensor_id_to_filename_and_metadata[
+                                        tensor_id
+                                    ][3],
+                                    self.tensor_id_to_loaded_tensor,
+                                    tensor_id,
+                                    self.tensor_being_loaded,
+                                    self.lock,
+                                )
                             )
                         # else: The tensor is being prefetched. Do nothing.
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.

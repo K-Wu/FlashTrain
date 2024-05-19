@@ -51,7 +51,7 @@ class SimpleModelTestWithCache(TestCase):
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
     @parametrize("use_checkpoint", [True, False])
-    @parametrize("adapter_type", ["native", "main_memory", "kvikio"])
+    @parametrize("adapter_type", ["native", "main_memory", "kvikio", "revolver"])
     def test_e2e_training(
         self,
         use_recursive_do=True,
@@ -77,6 +77,16 @@ class SimpleModelTestWithCache(TestCase):
             tensor_cache = TC.TensorCache(
                 enable_activation_context_recording=use_checkpoint,
                 adapter=adapters.KvikioIOAdapter(),
+            )
+        elif adapter_type == "revolver":
+            tensor_cache = TC.TensorCache(
+                enable_activation_context_recording=use_checkpoint,
+                adapter=adapters.RevolverIOAdapter(
+                    [
+                        TC.TorchBuiltinIOAdapter(),
+                        adapters.TorchMainMemoryIOAdapter(),
+                    ]
+                ),
             )
         else:
             assert adapter_type == "native"
