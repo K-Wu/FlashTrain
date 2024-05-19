@@ -1,8 +1,6 @@
 # Adapted from https://github.com/pytorch/PiPPy/blob/4cf876af4fd8931db99df11d30f64f2ff85c1b0c/examples/huggingface/pippy_gpt2.py
 # Copyright (c) Meta Platforms, Inc. and affiliates
 
-# Minimum effort to run this example:
-# $ torchrun --nproc-per-node 4 pippy_gpt2.py
 
 import argparse
 import os
@@ -11,6 +9,7 @@ import torch
 
 from transformers import GPT2ForSequenceClassification, GPT2Config
 from ...tensor_cache import tensor_cache as TC
+from ...tensor_cache import adapters
 from ...utils import (
     register_forward_hook_recursively,
     register_full_backward_hook_recursively,
@@ -48,7 +47,9 @@ def run(args, use_cache=True):
     print(gpt2)
 
     if use_cache:
-        tensor_cache = TC.TensorCache()
+        tensor_cache = TC.TensorCache(
+            # adapter=adapters.TorchMainMemoryIOAdapter()
+        )
         tensor_cache.add_parameters_from_module(gpt2)
 
         forward_hook = tensor_cache.get_forward_hook()
@@ -102,11 +103,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--master_port", type=str, default=os.getenv("MASTER_PORT", "29500")
     )
-    parser.add_argument("--schedule", type=str, default="FillDrain")
     parser.add_argument(
         "--cuda", type=int, default=int(torch.cuda.is_available())
     )
-    parser.add_argument("--chunks", type=int, default=4)
     # Note: this specific example requires: 1) a batch size that is divisible by
     # the number of chunks; 2) the division result (i.e. chunk size) must be 1,
     # otherwise padding token must be provided too (see GPT-2's forward function)
@@ -115,7 +114,6 @@ if __name__ == "__main__":
     parser.add_argument("--n_embd", type=int, default=None)
     parser.add_argument("--n_layer", type=int, default=None)
     parser.add_argument("--n_head", type=int, default=None)
-    parser.add_argument("--autosplit", action="store_true")
 
     args = parser.parse_args()
 
