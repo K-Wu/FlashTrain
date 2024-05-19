@@ -39,6 +39,10 @@ def prepare_oscar79k():
         "https://huggingface.co/bigscience/misc-test-data/resolve/main/stas/oscar-1GB.jsonl.xz",
         os.path.join(CACHE_PATH, "oscar-1GB.jsonl.xz"),
     )
+    urllib.request.urlretrieve(
+        "https://huggingface.co/togethercomputer/LLaMA-2-7B-32K/resolve/main/tokenizer.model",
+        os.path.join(CACHE_PATH, "tokenizer.model"),
+    )
     subprocess.run(
         ["xz", "-d", os.path.join(CACHE_PATH, "oscar-1GB.jsonl.xz")]
     )
