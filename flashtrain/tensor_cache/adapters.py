@@ -17,6 +17,8 @@ def create_new_filename(
     """
     Create a filename for a new file when storing tensor on the device.
     """
+    import random
+
     # Use TensorEqID instead of id(tensor) because id(tensor) collision may happen when the data pointers of the two different tensors are the same.
     return os.path.join(
         path,

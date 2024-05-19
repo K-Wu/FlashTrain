@@ -1,6 +1,7 @@
 import torch
 import os
 from dataclasses import dataclass
+from ..logger import logger
 
 
 def get_oneline_str(*args) -> str:
@@ -22,7 +23,7 @@ class SelfDeletingTempFile:
 class TensorEqID:  # (dataobject):
     """When PyTorch packs/unpacks tensors to/from computation graph, identical tensors may be wrapped by different Tensor objects to avoid cyclic reference. This class serves to determine if the underlying tensors are identical."""
 
-    data_ptr: int
+    data_ptr: int | tuple[int, ...]
     dtype: torch.dtype
     shape: tuple[int, ...]
     stride: tuple[int, ...]
@@ -30,8 +31,18 @@ class TensorEqID:  # (dataobject):
 
     @classmethod
     def from_tensor(cls, tensor: torch.Tensor):
+        import sys
+
+        # We have to use id(tensor) because the underlying storage will be unused when the tensor is released, causing collision if the new tensor has the same shape and stride.
+        if sys.getrefcount(tensor.untyped_storage()) > 1:
+            data_ptr = (
+                tensor.untyped_storage().data_ptr(),
+                sys.getrefcount(tensor.untyped_storage()),
+            )
+        else:
+            data_ptr = id(tensor)
         return cls(
-            data_ptr=tensor.untyped_storage().data_ptr(),
+            data_ptr=data_ptr,
             dtype=tensor.dtype,
             shape=tuple(tensor.shape),
             stride=tensor.stride(),
@@ -39,10 +50,15 @@ class TensorEqID:  # (dataobject):
         )
 
     def __str__(self):
+        data_ptr_str = (
+            f"{self.data_ptr[0]:x}.{self.data_ptr[1]}"
+            if isinstance(self.data_ptr, tuple)
+            else f"{self.data_ptr:x}"
+        )
         stride_str = ".".join(map(str, self.stride))
         shape_str = ".".join(map(str, self.shape))
         return (
-            f"{self.data_ptr:x}_{self.dtype}_{shape_str}_{stride_str}_{str(self.device).replace(':', '_')}"
+            f"{data_ptr_str}_{self.dtype}_{shape_str}_{stride_str}_{str(self.device).replace(':', '_')}"
         )
 
     def __repr__(self):
