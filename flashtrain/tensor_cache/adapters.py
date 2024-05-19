@@ -100,11 +100,14 @@ class KvikioIOAdapter:
         Load the tensor from the file.
         """
 
-        logger.info(f"Kvikio Async wrapper loading tensor from path {path}")
         with thread_lock:
-            tensor_id_to_loaded_tensor[tensor_id] = self.load_tensor(
-                path, shape, dtype, device
-            )
+            if tensor_id in tensor_id_to_loaded_tensor:
+                del tensor_being_loaded[tensor_id]
+                return
+        logger.info(f"Kvikio Async wrapper loading tensor from path {path}")
+        loaded = self.load_tensor(path, shape, dtype, device)
+        with thread_lock:
+            tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
     def clean_up_in_backward(
@@ -190,11 +193,14 @@ class TorchMainMemoryIOAdapter:
         Load the tensor from the file.
         """
 
-        logger.info(f"Kvikio Async wrapper loading tensor from path {path}")
         with thread_lock:
-            tensor_id_to_loaded_tensor[tensor_id] = self.load_tensor(
-                path, shape, dtype, device
-            )
+            if tensor_id in tensor_id_to_loaded_tensor:
+                del tensor_being_loaded[tensor_id]
+                return
+        logger.info(f"Kvikio Async wrapper loading tensor from path {path}")
+        loaded = self.load_tensor(path, shape, dtype, device)
+        with thread_lock:
+            tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
     def clean_up_in_backward(
@@ -291,9 +297,12 @@ class RevolverIOAdapter:
         Load the tensor from the file.
         """
         with thread_lock:
-            tensor_id_to_loaded_tensor[tensor_id] = self.load_tensor(
-                path, shape, dtype, device
-            )
+            if tensor_id in tensor_id_to_loaded_tensor:
+                del tensor_being_loaded[tensor_id]
+                return
+        loaded = self.load_tensor(path, shape, dtype, device)
+        with thread_lock:
+            tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
     def clean_up_in_backward(

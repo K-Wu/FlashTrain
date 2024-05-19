@@ -93,9 +93,14 @@ class TorchBuiltinIOAdapter:
         """
         Load the tensor from the file.
         """
-        logger.info(f"Async loading tensor from path {path}")
         with lock:
-            tensor_id_to_loaded_tensor[tensor_id] = torch.load(path)
+            if tensor_id in tensor_being_loaded:
+                del tensor_being_loaded[tensor_id]
+                return
+        logger.info(f"Async loading tensor from path {path}")
+        loaded = torch.load(path)
+        with lock:
+            tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
     def clean_up_in_backward(
@@ -681,11 +686,12 @@ class TensorCache:
                     " forward pass."
                 )
                 # Delay the clean up of the cache to the beginning of the next forward pass.
-                add_to_module_to_clear(
-                    self,
-                    m,
-                    self.delayed_backward_done_modules_with_cache_to_clear,
-                )
+                with self.lock:
+                    add_to_module_to_clear(
+                        self,
+                        m,
+                        self.delayed_backward_done_modules_with_cache_to_clear,
+                    )
                 return
 
             logger.info(
@@ -787,56 +793,54 @@ class TensorCache:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
                     self.update_current_activation_context_in_forward()
-            # We need to ensure thread-safety during the backward pass.
-            with self.lock:
-                # Skip parameters because they will stay in memory always.
-                if isinstance(tensor_id_or_tensor, torch.Tensor):
-                    if (
-                        TensorEqID.from_tensor(tensor_id_or_tensor)
-                        in self.parameters_and_inputs
-                    ):
-                        logger.info(
-                            "Tensor cache skips unpacking, due to parameters"
-                            " and inputs,"
-                            f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
-                            f" {tensor_id_or_tensor.shape}"
-                        )
-                    else:
-                        logger.info(
-                            "Tensor cache skips unpacking, due to activation"
-                            " recomputing,"
-                            f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
-                            f" {tensor_id_or_tensor.shape}"
-                        )
-                    return tensor_id_or_tensor
+            # Skip parameters because they will stay in memory always.
+            if isinstance(tensor_id_or_tensor, torch.Tensor):
+                if (
+                    TensorEqID.from_tensor(tensor_id_or_tensor)
+                    in self.parameters_and_inputs
+                ):
+                    logger.info(
+                        "Tensor cache skips unpacking, due to parameters"
+                        " and inputs,"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        f" {tensor_id_or_tensor.shape}"
+                    )
                 else:
-                    # The argument is TensorEqID
-                    if (
-                        not tensor_id_or_tensor
-                        in self.tensor_id_to_loaded_tensor
-                    ):
+                    logger.info(
+                        "Tensor cache skips unpacking, due to activation"
+                        " recomputing,"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        f" {tensor_id_or_tensor.shape}"
+                    )
+                return tensor_id_or_tensor
+            else:
+                # The argument is TensorEqID
+                if not tensor_id_or_tensor in self.tensor_id_to_loaded_tensor:
+                    result_tensor = self.adapter.load_tensor(
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][0],
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][1],
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][2],
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][3],
+                    )
+                    # We need to ensure thread-safety during the backward pass.
+                    with self.lock:
                         self.tensor_id_to_loaded_tensor[
                             tensor_id_or_tensor
-                        ] = self.adapter.load_tensor(
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][0],
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][1],
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][2],
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][3],
-                        )
+                        ] = result_tensor
 
-                    logger.info(
-                        f"Unpacking {tensor_id_or_tensor},"
-                        f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
-                    )
-                    return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
+                logger.info(
+                    f"Unpacking {tensor_id_or_tensor},"
+                    f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
+                )
+                return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
 
         return unpack_hook
 
