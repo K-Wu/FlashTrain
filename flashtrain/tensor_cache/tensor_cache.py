@@ -93,9 +93,14 @@ class TorchBuiltinIOAdapter:
         """
         Load the tensor from the file.
         """
-        logger.info(f"Async loading tensor from path {path}")
         with lock:
-            tensor_id_to_loaded_tensor[tensor_id] = torch.load(path)
+            if tensor_id in tensor_being_loaded:
+                del tensor_being_loaded[tensor_id]
+                return
+        logger.info(f"Async loading tensor from path {path}")
+        loaded = torch.load(path)
+        with lock:
+            tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
     def clean_up_in_backward(
@@ -232,7 +237,10 @@ class TensorCache:
     backward_done_modules_with_cache_to_clear: set[
         ModuleReentrantContext | ActivationContext
     ]
-    orevious_module_to_next_module: dict[
+    delayed_backward_done_modules_with_cache_to_clear: set[
+        ModuleReentrantContext | ActivationContext
+    ]
+    next_module_to_previous_module: dict[
         ModuleReentrantContext | ActivationContext,
         ModuleReentrantContext | ActivationContext,
     ]
@@ -284,6 +292,7 @@ class TensorCache:
         self.forward_done_modules = []
         self.backward_done_modules = set()
         self.backward_done_modules_with_cache_to_clear = set()
+        self.delayed_backward_done_modules_with_cache_to_clear = set()
         self.next_module_to_previous_module = {}
 
         self.tensor_id_to_tensor_to_store = {}
@@ -360,6 +369,17 @@ class TensorCache:
                 self.activation_checkpoints.clear()
                 self.activation_checkpoint_to_module_id.clear()
                 self.previous_module_to_activation_context.clear()
+        else:
+            if (
+                self.current_in_backward
+                and len(self.delayed_backward_done_modules_with_cache_to_clear)
+                > 0
+            ):
+                self.backward_done_modules_with_cache_to_clear.update(
+                    self.delayed_backward_done_modules_with_cache_to_clear
+                )
+                self.clear_up_done_backward_modules_cache()
+                self.delayed_backward_done_modules_with_cache_to_clear.clear()
 
         # Clear all the data structures that are only used in the previous backward pass.
         self.forward_done_modules.clear()
@@ -418,9 +438,9 @@ class TensorCache:
             self.activation_checkpoint_to_module_id[
                 self.current_activation_context
             ] = set()
-            self.module_id_to_tensor_ids[self.current_activation_context] = (
-                set()
-            )
+            self.module_id_to_tensor_ids[
+                self.current_activation_context
+            ] = set()
             logger.info(
                 "Adding activation context"
                 f" {self.current_activation_context} into"
@@ -436,9 +456,9 @@ class TensorCache:
                 previous_module
                 not in self.previous_module_to_activation_context
             )
-            self.previous_module_to_activation_context[previous_module] = (
-                self.current_activation_context
-            )
+            self.previous_module_to_activation_context[
+                previous_module
+            ] = self.current_activation_context
             self.forward_module_scope_stack.append(
                 self.current_activation_context
             )
@@ -630,12 +650,50 @@ class TensorCache:
         def all_is_none(grad_input):
             return all(g is None for g in grad_input)
 
+        def add_to_module_to_clear(self, m, backward_module_to_clear):
+            if id(m) in self.module_id_to_reenter_count:
+                # This module is reentered. We need to clean the cache of the corresponding reentered context rather than the first context.
+                self.backward_done_modules.add(
+                    ModuleReentrantContext(
+                        module_id=id(m),
+                        reenter_count=self.module_id_to_reenter_count[id(m)],
+                    )
+                )
+                self.backward_done_modules_with_cache_to_clear.add(
+                    ModuleReentrantContext(
+                        module_id=id(m),
+                        reenter_count=self.module_id_to_reenter_count[id(m)],
+                    )
+                )
+                self.module_id_to_reenter_count[id(m)] -= 1
+                if self.module_id_to_reenter_count[id(m)] == 0:
+                    del self.module_id_to_reenter_count[id(m)]
+            else:
+                # The runtime has finished the backward logic within module m.
+                self.backward_done_modules.add(
+                    ModuleReentrantContext(module_id=id(m), reenter_count=0)
+                )
+                self.backward_done_modules_with_cache_to_clear.add(
+                    ModuleReentrantContext(module_id=id(m), reenter_count=0)
+                )
+
         def full_backward_hook(m, grad_input, grad_output) -> None:
             if all_is_none(grad_input):
                 logger.warning(
                     f"All grad_input is None for {get_oneline_str(m)}. This"
-                    " may trigger pre-mature cache clean up!"
+                    " may trigger pre-mature cache clean up! We delay the"
+                    " clean up of the cache to the beginning of the next"
+                    " forward pass."
                 )
+                # Delay the clean up of the cache to the beginning of the next forward pass.
+                with self.lock:
+                    add_to_module_to_clear(
+                        self,
+                        m,
+                        self.delayed_backward_done_modules_with_cache_to_clear,
+                    )
+                return
+
             logger.info(
                 f"Full backward hook for ({id(m)}) {get_oneline_str(m)},"
                 f" {get_oneline_str(grad_input)},"
@@ -643,39 +701,9 @@ class TensorCache:
             )
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
-                if id(m) in self.module_id_to_reenter_count:
-                    # This module is reentered. We need to clean the cache of the corresponding reentered context rather than the first context.
-                    self.backward_done_modules.add(
-                        ModuleReentrantContext(
-                            module_id=id(m),
-                            reenter_count=self.module_id_to_reenter_count[
-                                id(m)
-                            ],
-                        )
-                    )
-                    self.backward_done_modules_with_cache_to_clear.add(
-                        ModuleReentrantContext(
-                            module_id=id(m),
-                            reenter_count=self.module_id_to_reenter_count[
-                                id(m)
-                            ],
-                        )
-                    )
-                    self.module_id_to_reenter_count[id(m)] -= 1
-                    if self.module_id_to_reenter_count[id(m)] == 0:
-                        del self.module_id_to_reenter_count[id(m)]
-                else:
-                    # The runtime has finished the backward logic within module m.
-                    self.backward_done_modules.add(
-                        ModuleReentrantContext(
-                            module_id=id(m), reenter_count=0
-                        )
-                    )
-                    self.backward_done_modules_with_cache_to_clear.add(
-                        ModuleReentrantContext(
-                            module_id=id(m), reenter_count=0
-                        )
-                    )
+                add_to_module_to_clear(
+                    self, m, self.backward_done_modules_with_cache_to_clear
+                )
             self.clear_up_done_backward_modules_cache()
 
         return full_backward_hook
@@ -735,6 +763,10 @@ class TensorCache:
                     self.tensor_id_to_tensor_to_store[tensor_id] = weakref.ref(
                         tensor
                     )
+                else:
+                    logger.info(
+                        f"Tensor {tensor_id} already exists in tensor to store"
+                    )
                 if tensor_id not in self.tensor_id_to_module_ids:
                     self.tensor_id_to_module_ids[tensor_id] = set()
                 self.tensor_id_to_module_ids[tensor_id].add(
@@ -761,56 +793,54 @@ class TensorCache:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
                     self.update_current_activation_context_in_forward()
-            # We need to ensure thread-safety during the backward pass.
-            with self.lock:
-                # Skip parameters because they will stay in memory always.
-                if isinstance(tensor_id_or_tensor, torch.Tensor):
-                    if (
-                        TensorEqID.from_tensor(tensor_id_or_tensor)
-                        in self.parameters_and_inputs
-                    ):
-                        logger.info(
-                            "Tensor cache skips unpacking, due to parameters"
-                            " and inputs,"
-                            f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
-                            f" {tensor_id_or_tensor.shape}"
-                        )
-                    else:
-                        logger.info(
-                            "Tensor cache skips unpacking, due to activation"
-                            " recomputing,"
-                            f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
-                            f" {tensor_id_or_tensor.shape}"
-                        )
-                    return tensor_id_or_tensor
+            # Skip parameters because they will stay in memory always.
+            if isinstance(tensor_id_or_tensor, torch.Tensor):
+                if (
+                    TensorEqID.from_tensor(tensor_id_or_tensor)
+                    in self.parameters_and_inputs
+                ):
+                    logger.info(
+                        "Tensor cache skips unpacking, due to parameters"
+                        " and inputs,"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        f" {tensor_id_or_tensor.shape}"
+                    )
                 else:
-                    # The argument is TensorEqID
-                    if (
-                        not tensor_id_or_tensor
-                        in self.tensor_id_to_loaded_tensor
-                    ):
+                    logger.info(
+                        "Tensor cache skips unpacking, due to activation"
+                        " recomputing,"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        f" {tensor_id_or_tensor.shape}"
+                    )
+                return tensor_id_or_tensor
+            else:
+                # The argument is TensorEqID
+                if not tensor_id_or_tensor in self.tensor_id_to_loaded_tensor:
+                    result_tensor = self.adapter.load_tensor(
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][0],
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][1],
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][2],
+                        self.tensor_id_to_filename_and_metadata[
+                            tensor_id_or_tensor
+                        ][3],
+                    )
+                    # We need to ensure thread-safety during the backward pass.
+                    with self.lock:
                         self.tensor_id_to_loaded_tensor[
                             tensor_id_or_tensor
-                        ] = self.adapter.load_tensor(
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][0],
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][1],
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][2],
-                            self.tensor_id_to_filename_and_metadata[
-                                tensor_id_or_tensor
-                            ][3],
-                        )
+                        ] = result_tensor
 
-                    logger.info(
-                        f"Unpacking {tensor_id_or_tensor},"
-                        f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
-                    )
-                    return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
+                logger.info(
+                    f"Unpacking {tensor_id_or_tensor},"
+                    f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
+                )
+                return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
 
         return unpack_hook
 
@@ -841,21 +871,21 @@ class TensorCache:
                             self.tensor_being_loaded[tensor_id].result()
                         else:
                             # Blocking load the tensor from the file.
-                            self.tensor_id_to_loaded_tensor[tensor_id] = (
-                                self.adapter.load_tensor(
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][0],
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][1],
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][2],
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][3],
-                                )
+                            self.tensor_id_to_loaded_tensor[
+                                tensor_id
+                            ] = self.adapter.load_tensor(
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][0],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][1],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][2],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][3],
                             )
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.
         return
@@ -876,26 +906,26 @@ class TensorCache:
                     else:  # The tensor is not in memory.
                         if not tensor_id in self.tensor_being_loaded:
                             # The tensor is not being prefetched. Prefetch the tensor.
-                            self.tensor_being_loaded[tensor_id] = (
-                                self.executor.submit(
-                                    self.adapter.async_load_tensor,
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][0],
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][1],
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][2],
-                                    self.tensor_id_to_filename_and_metadata[
-                                        tensor_id
-                                    ][3],
-                                    self.tensor_id_to_loaded_tensor,
-                                    tensor_id,
-                                    self.tensor_being_loaded,
-                                    self.lock,
-                                )
+                            self.tensor_being_loaded[
+                                tensor_id
+                            ] = self.executor.submit(
+                                self.adapter.async_load_tensor,
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][0],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][1],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][2],
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][3],
+                                self.tensor_id_to_loaded_tensor,
+                                tensor_id,
+                                self.tensor_being_loaded,
+                                self.lock,
                             )
                         # else: The tensor is being prefetched. Do nothing.
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.

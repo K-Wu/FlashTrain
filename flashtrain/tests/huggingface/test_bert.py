@@ -1,25 +1,22 @@
-# Adapted from https://github.com/pytorch/PiPPy/blob/9de3f4a9e697852da7279828519d8465c9cc9f7e/examples/huggingface/pippy_opt.py
+# Adapted from https://github.com/pytorch/PiPPy/blob/b4fa47626216687f67c062d1453dcb379af7102f/examples/huggingface/pippy_bert.py
+
 # Copyright (c) Meta Platforms, Inc. and affiliates
 
-
-# In order to enable training according to example_train.py
-# 1) get target (label) via generate_inputs_for_model argument
-# 2) Add loss function, loss_fn=torch.nn.MSELoss(reduction="sum"); schedule = ScheduleGPipe(stage, chunks, loss_fn=loss_fn)
-# 3) in the last stage, specify losses=[]; schedule.step(target=target, losses = losses)
-
-# According to the CPU init example, in this huggingface example, the pipeline should be created on the CPU and each stage is transfered to the corresponding GPU. Therefore, there won't be memory issue like the whole pipeline being instantiated on each GPU. Reference: https://github.com/pytorch/PiPPy/blob/main/examples/cpu_init/gpt2_cpu_init.py; https://github.com/pytorch/PiPPy/issues/988#issuecomment-2017042001
 
 import argparse
 import os
 
 import torch
-from transformers import OPTForCausalLM, OPTConfig
+
+from transformers import BertForSequenceClassification, BertConfig
 from ...tensor_cache import tensor_cache as TC
+from ...tensor_cache import adapters
 from ...utils import (
     register_forward_hook_recursively,
     register_full_backward_hook_recursively,
     register_forward_pre_hook_recursively,
     register_full_backward_pre_hook_recursively,
+    register_transpose_of_linear_weights,
 )
 import logging
 from ...logger import logger
@@ -31,24 +28,26 @@ from .hf_utils import generate_inputs_for_model, get_number_of_params
 
 def run(args, use_cache=True):
     # Model configs
-    config = OPTConfig().from_pretrained("facebook/opt-125m")
-    # Set a very small number of hidden layers to allow training on RTX 3090
-    config.num_hidden_layers = 3
+    config = BertConfig()
     print("Using device:", args.device)
 
     # Create model
-    model_class = OPTForCausalLM
-    model_name = "OPTForCausalLM"
-    opt = model_class(config)
-    opt.to(args.device)
-    # opt.eval()
-    print(opt.config)
-    print(f"Total number of params = {get_number_of_params(opt) // 10 ** 6}M")
-    print(opt)
+    model_class = BertForSequenceClassification
+    model_name = "BertForSequenceClassification"
+    bert = model_class(config)
+    bert.to(args.device)
+    bert.eval()
+    print(bert.config)
+    print(f"Total number of params = {get_number_of_params(bert) // 10 ** 6}M")
+    print(bert)
 
     if use_cache:
-        tensor_cache = TC.TensorCache()
-        tensor_cache.add_parameters_from_module(opt)
+        tensor_cache = TC.TensorCache(
+            # adapter=adapters.TorchMainMemoryIOAdapter(),
+            # enable_activation_context_recording=False,
+        )
+        tensor_cache.add_parameters_from_module(bert)
+        register_transpose_of_linear_weights(bert, tensor_cache)
 
         forward_hook = tensor_cache.get_forward_hook()
         backward_hook = tensor_cache.get_backward_hook()
@@ -57,12 +56,13 @@ def run(args, use_cache=True):
         pack_hook = tensor_cache.get_pack_hook()
         unpack_hook = tensor_cache.get_unpack_hook()
 
-        register_forward_hook_recursively(opt, forward_hook)
-        register_full_backward_hook_recursively(opt, backward_hook)
-        register_forward_pre_hook_recursively(opt, forward_pre_hook)
-        register_full_backward_pre_hook_recursively(opt, backward_pre_hook)
+        register_forward_hook_recursively(bert, forward_hook)
+        register_full_backward_hook_recursively(bert, backward_hook)
+        register_forward_pre_hook_recursively(bert, forward_pre_hook)
+        register_full_backward_pre_hook_recursively(bert, backward_pre_hook)
 
         cm = torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook)
+        # cm = contextlib.nullcontext()
     else:
         cm = contextlib.nullcontext()
 
@@ -71,19 +71,18 @@ def run(args, use_cache=True):
         # Input configs
         example_inputs = generate_inputs_for_model(
             model_class,
-            opt,
+            bert,
             model_name,
             args.batch_size,
             args.device,
             include_loss_args=True,
         )
-        # print(example_inputs.keys()) # input_ids, labels
-
         tensor_cache.add_inputs_or_parameters(example_inputs["input_ids"])
         tensor_cache.add_inputs_or_parameters(example_inputs["labels"])
         with cm:
-            loss = opt(**example_inputs).loss
+            loss = bert(**example_inputs).loss
             loss.backward()
+
         tensor_cache.del_inputs_or_parameters(example_inputs["input_ids"])
         tensor_cache.del_inputs_or_parameters(example_inputs["labels"])
 
@@ -91,10 +90,12 @@ def run(args, use_cache=True):
 
 
 if __name__ == "__main__":
+    logger.setLevel(logging.getLevelName("INFO"))
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--world_size", type=int, default=int(os.getenv("WORLD_SIZE", 4))
     )
+    parser.add_argument("--rank", type=int, default=int(os.getenv("RANK", -1)))
     parser.add_argument(
         "--master_addr",
         type=str,
@@ -116,5 +117,4 @@ if __name__ == "__main__":
     else:
         args.device = torch.device("cpu")
 
-    logger.setLevel(logging.getLevelName("INFO"))
     run(args)
