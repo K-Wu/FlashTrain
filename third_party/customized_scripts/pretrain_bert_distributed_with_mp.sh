@@ -34,8 +34,8 @@ BERT_ARGS="
     --micro-batch-size 2 \
     --global-batch-size 16 \
     --lr 0.0001 \
-    --train-iters 1000000 \
-    --lr-decay-iters 990000 \
+    --train-iters 1000 \
+    --lr-decay-iters 990 \
     --lr-decay-style linear \
     --min-lr 1.0e-5 \
     --weight-decay 1e-2 \
@@ -52,9 +52,9 @@ DATA_ARGS="
 "
 
 OUTPUT_ARGS="
-    --log-interval 100 \
+    --log-interval 10 \
     --save-interval 10000 \
-    --eval-interval 1000 \
+    --eval-interval 10000 \
     --eval-iters 10
 "
 

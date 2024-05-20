@@ -33,7 +33,7 @@ NUM_KV_HEADS=4 # llama2 70B uses GQA
 
 MICRO_BATCH_SIZE=4
 GLOBAL_BATCH_SIZE=32 # e.g. llama: 4M tokens
-TRAIN_STEPS=250000 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
+TRAIN_STEPS=2500 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
 LR=3e-4
 MIN_LR=3e-5
 LR_WARMUP_STEPS=2000
@@ -123,7 +123,7 @@ torchrun $DISTRIBUTED_ARGS \
        --adam-beta2 0.95 \
        --log-interval 1 \
        --save-interval 10000 \
-       --eval-interval 1000 \
+       --eval-interval 10000 \
        --eval-iters 10 \
        --bf16 \
        --no-query-key-layer-scaling \

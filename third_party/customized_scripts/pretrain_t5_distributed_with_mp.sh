@@ -37,8 +37,8 @@ T5_ARGS="
     --micro-batch-size 16 \
     --global-batch-size 128 \
     --lr 0.0001 \
-    --train-iters 1000000 \
-    --lr-decay-iters 1000000 \
+    --train-iters 1000 \
+    --lr-decay-iters 1000 \
     --lr-decay-style linear \
     --min-lr 0.00001 \
     --weight-decay 1e-2 \
@@ -56,9 +56,9 @@ DATA_ARGS="
 "
 
 OUTPUT_ARGS="
-    --log-interval 100 \
+    --log-interval 10 \
     --save-interval 10000 \
-    --eval-interval 1000 \
+    --eval-interval 10000 \
     --eval-iters 10
 "
 
