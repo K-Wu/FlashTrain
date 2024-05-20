@@ -1,5 +1,5 @@
 #!/bin/bash
-# Adapted from /home/kunwu2/FlashTrain/third_party/Megatron-DeepSpeed/examples_deepspeed/pretrain_llama2_distributed.sh with dataset and tokernizer path changed according to the working datasets specified in test_load_datasets.py
+# Adapted from https://github.com/microsoft/Megatron-DeepSpeed/blob/94dbfd1cd35fea44f3a504722060bee4962816e8/examples/pretrain_llama2_distributed.sh (forked from github.com/microsoft/Megatron-DeepSpeed/) with dataset and tokernizer path changed according to the working datasets specified in test_load_datasets.py
 # This example script is contributed by external user https://github.com/nrailgun
 set -ex
 
@@ -92,7 +92,7 @@ fi
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
 torchrun $DISTRIBUTED_ARGS \
-       ../pretrain_gpt.py \
+       pretrain_gpt.py \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \
        --num-layers $NUM_LAYERS \
