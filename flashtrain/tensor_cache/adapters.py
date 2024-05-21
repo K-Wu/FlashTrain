@@ -7,6 +7,7 @@ import concurrent.futures
 import threading
 from typing import Any
 import os
+from abc import ABCMeta, abstractmethod
 
 
 def create_new_filename(
@@ -28,7 +29,90 @@ def create_new_filename(
     )
 
 
-class KvikioIOAdapter:
+class AdapterBase(metaclass=ABCMeta):
+    @abstractmethod
+    def create_new_filename(
+        self,
+        identifier: str,  # Used to distinguish tensors among distributed processes.
+        tensor: torch.Tensor,
+    ):
+        """
+        Create a filename for a new file when storing tensor on the device.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def save_tensor(self, tensor: torch.Tensor, path: str):
+        """
+        Save the tensor to the file.
+        """
+        raise NotImplementedError
+
+    # TODO: return error code
+    def async_save_tensor(
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
+        thread_lock: threading.Lock,
+    ):
+        self.save_tensor(tensor, path)
+        logger.info(
+            f"Async wrapper saved tensor {TensorEqID.from_tensor(tensor)}"
+        )
+        with thread_lock:
+            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
+
+    @abstractmethod
+    def load_tensor(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        """
+        Load the tensor from the file.
+        """
+        raise NotImplementedError
+
+    # TODO: return error code
+    def async_load_tensor(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
+        tensor_id: TensorEqID,
+        tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
+        thread_lock: threading.Lock,
+    ):
+        """
+        Load the tensor from the file.
+        """
+        with thread_lock:
+            if tensor_id in tensor_id_to_loaded_tensor:
+                del tensor_being_loaded[tensor_id]
+                return
+        logger.info(f"Async wrapper loading tensor from path {path}")
+        loaded = self.load_tensor(path, shape, dtype, device)
+        with thread_lock:
+            tensor_id_to_loaded_tensor[tensor_id] = loaded
+            del tensor_being_loaded[tensor_id]
+
+    # TODO: implement clean_up_when_end to delete files
+    def clean_up_in_backward(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        pass
+
+
+class KvikioIOAdapter(AdapterBase):
     path: str
 
     def __init__(self, path: str = "/tmp"):
@@ -55,21 +139,6 @@ class KvikioIOAdapter:
             f.write(tensor_cupy)
         logger.info(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
 
-    def async_save_tensor(
-        self,
-        tensor: torch.Tensor,
-        path: str,
-        tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
-    ):
-        self.save_tensor(tensor, path)
-        logger.info(
-            "Kvikio Async wrapper saved tensor"
-            f" {TensorEqID.from_tensor(tensor)}"
-        )
-        with thread_lock:
-            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
-
     def load_tensor(
         self,
         path: str,
@@ -87,44 +156,10 @@ class KvikioIOAdapter:
         logger.info(f"Kvikio Loading tensor from path {path}")
         return tensor
 
-    def async_load_tensor(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
-        tensor_id: TensorEqID,
-        tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
-    ):
-        """
-        Load the tensor from the file.
-        """
-
-        with thread_lock:
-            if tensor_id in tensor_id_to_loaded_tensor:
-                del tensor_being_loaded[tensor_id]
-                return
-        logger.info(f"Kvikio Async wrapper loading tensor from path {path}")
-        loaded = self.load_tensor(path, shape, dtype, device)
-        with thread_lock:
-            tensor_id_to_loaded_tensor[tensor_id] = loaded
-            del tensor_being_loaded[tensor_id]
-
-    def clean_up_in_backward(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        pass
-
     # TODO: implement clean_up_when_end to delete files
 
 
-class TorchMainMemoryIOAdapter:
+class TorchMainMemoryIOAdapter(AdapterBase):
     cpu_tensor_cache: dict[
         tuple[str, torch.Size, torch.dtype, torch.device], torch.Tensor
     ]
@@ -151,21 +186,6 @@ class TorchMainMemoryIOAdapter:
         ] = tensor.cpu()
         logger.info(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
 
-    def async_save_tensor(
-        self,
-        tensor: torch.Tensor,
-        path: str,
-        tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
-    ):
-        self.save_tensor(tensor, path)
-        logger.info(
-            "Kvikio Async wrapper saved tensor"
-            f" {TensorEqID.from_tensor(tensor)}"
-        )
-        with thread_lock:
-            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
-
     def load_tensor(
         self,
         path: str,
@@ -180,44 +200,10 @@ class TorchMainMemoryIOAdapter:
         logger.info(f"Kvikio Loading tensor from path {path}")
         return tensor
 
-    def async_load_tensor(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
-        tensor_id: TensorEqID,
-        tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
-    ):
-        """
-        Load the tensor from the file.
-        """
-
-        with thread_lock:
-            if tensor_id in tensor_id_to_loaded_tensor:
-                del tensor_being_loaded[tensor_id]
-                return
-        logger.info(f"Kvikio Async wrapper loading tensor from path {path}")
-        loaded = self.load_tensor(path, shape, dtype, device)
-        with thread_lock:
-            tensor_id_to_loaded_tensor[tensor_id] = loaded
-            del tensor_being_loaded[tensor_id]
-
-    def clean_up_in_backward(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        self.cpu_tensor_cache.pop((path, shape, dtype, device), None)
-
     # TODO: implement clean_up_when_end which does nothing
 
 
-class RevolverIOAdapter:
+class RevolverIOAdapter(AdapterBase):
     adapters: list[KvikioIOAdapter | Any]
     storage_adapters_id: int
 

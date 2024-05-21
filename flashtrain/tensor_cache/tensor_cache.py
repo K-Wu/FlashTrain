@@ -15,7 +15,7 @@ import contextlib
 import traceback
 from ..logger import logger
 from .utils import get_oneline_str, TensorEqID
-from .adapters import create_new_filename
+from .adapters import create_new_filename, AdapterBase
 from dataclasses import dataclass
 
 
@@ -26,7 +26,7 @@ def get_process_descriptor() -> str:
         return f"{socket.gethostname()}"
 
 
-class TorchBuiltinIOAdapter:
+class TorchBuiltinIOAdapter(AdapterBase):
     path: str
 
     def __init__(self, path: str = "/tmp"):
@@ -49,21 +49,6 @@ class TorchBuiltinIOAdapter:
         torch.save(tensor, path)
         logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)} to {path}")
 
-    # TODO: return error code
-    def async_save_tensor(
-        self,
-        tensor: torch.Tensor,
-        path: str,
-        tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
-        lock: threading.Lock,
-    ):
-        torch.save(tensor, path)
-        logger.info(
-            f"Async saved tensor {TensorEqID.from_tensor(tensor)} to {path}"
-        )
-        with lock:
-            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
-
     def load_tensor(
         self,
         path: str,
@@ -78,39 +63,6 @@ class TorchBuiltinIOAdapter:
 
         logger.info(f"Loading tensor from path {path}")
         return torch.load(path)
-
-    def async_load_tensor(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
-        tensor_id: TensorEqID,
-        tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
-        lock: threading.Lock,
-    ):
-        """
-        Load the tensor from the file.
-        """
-        with lock:
-            if tensor_id in tensor_being_loaded:
-                del tensor_being_loaded[tensor_id]
-                return
-        logger.info(f"Async loading tensor from path {path}")
-        loaded = torch.load(path)
-        with lock:
-            tensor_id_to_loaded_tensor[tensor_id] = loaded
-            del tensor_being_loaded[tensor_id]
-
-    def clean_up_in_backward(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        pass
 
     # TODO: implement clean_up_when_end to delete files
 
@@ -204,6 +156,7 @@ class ModuleReentrantContext:
 class TensorCache:
     enable_activation_context_recording: bool
     enable_prefetch: bool
+    implicit_set_in_backward: bool
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -273,11 +226,13 @@ class TensorCache:
         enable_activation_context_recording=False,
         enable_prefetch=True,
         adapter: TorchBuiltinIOAdapter | Any = None,
+        implicit_set_in_backward: bool = False,
     ):
         self.enable_activation_context_recording = (
             enable_activation_context_recording
         )
         self.enable_prefetch = enable_prefetch
+        self.implicit_set_in_backward = implicit_set_in_backward
         self.module_id_to_tensor_ids = {}
         self.tensor_id_to_module_ids = {}
 
@@ -478,8 +433,16 @@ class TensorCache:
         # In backward propagation, the checkpoint region is triggered if any of its module within it is triggered or any of the tensor within it is unpacked. To detect this, we need to maintain dictionary mapping from module id (+reentrent) to activation context and from tensor to activation context. This is not needed because there is no need to maintain which activation context we are currently in when we are in the backward pass, but only which activation context we have done.
         """In backward propagation, the checkpoint region is done after all modules within it are done and the backward process of the previous (in forward propagation) layer is triggered. To detect this, we need to maintain activation context to modules and previous-module to activation context."""
         assert self.enable_activation_context_recording
-
-        assert self.current_in_backward
+        if not self.implicit_set_in_backward:
+            assert self.current_in_backward
+        else:
+            if not self.current_in_backward:
+                logger.warning(
+                    "Implicitly setting current_in_backward to True"
+                    " because it is not set."
+                )
+                with self.lock:
+                    self.set_in_backward()
         if backward_pre_hook_target:
             backward_pre_module = ModuleReentrantContext(
                 module_id=id(backward_pre_hook_target),
