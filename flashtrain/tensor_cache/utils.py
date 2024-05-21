@@ -35,12 +35,15 @@ class TensorEqID:  # (dataobject):
 
         # We have to use id(tensor) because the underlying storage will be unused when the tensor is released, causing collision if the new tensor has the same shape and stride.
         if sys.getrefcount(tensor.untyped_storage()) > 1:
+            logger.warning(
+                f"The storage of {tensor} is shared by multiple tensors."
+            )
             data_ptr = (
                 tensor.untyped_storage().data_ptr(),
-                sys.getrefcount(tensor.untyped_storage()),
+                0,  # reserved
             )
         else:
-            data_ptr = id(tensor)
+            data_ptr = id(tensor.data)
         return cls(
             data_ptr=data_ptr,
             dtype=tensor.dtype,
