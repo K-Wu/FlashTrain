@@ -309,7 +309,7 @@ class TensorCache:
             if self.current_in_backward:
                 # Check if there is left-over activation region to clear up.
                 activation_context = (
-                    self.check_done_activation_context_in_backward(None)
+                    self._check_done_activation_context_in_backward(None)
                 )
                 if activation_context:
                     with self.lock:
@@ -345,7 +345,7 @@ class TensorCache:
     def set_in_backward(self):
         """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
         if self.enable_activation_context_recording:
-            self.update_current_activation_context_in_forward()
+            self._update_current_activation_context_in_forward()
         self.forward_module_scope_stack.clear()
         self.next_module_to_previous_module = {
             self.forward_done_modules[idx + 1]: self.forward_done_modules[idx]
@@ -354,7 +354,7 @@ class TensorCache:
         logger.info("Set current_in_backward flag to True")
         self.current_in_backward = True
 
-    def update_current_activation_context_in_forward(self):
+    def _update_current_activation_context_in_forward(self):
         assert self.enable_activation_context_recording
 
         assert not self.current_in_backward
@@ -427,7 +427,7 @@ class TensorCache:
                 )
                 self.forward_module_scope_stack.pop()
 
-    def check_done_activation_context_in_backward(
+    def _check_done_activation_context_in_backward(
         self, backward_pre_hook_target: torch.nn.Module | None
     ) -> None | ActivationContext:
         # In backward propagation, the checkpoint region is triggered if any of its module within it is triggered or any of the tensor within it is unpacked. To detect this, we need to maintain dictionary mapping from module id (+reentrent) to activation context and from tensor to activation context. This is not needed because there is no need to maintain which activation context we are currently in when we are in the backward pass, but only which activation context we have done.
@@ -503,7 +503,7 @@ class TensorCache:
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
-                    self.update_current_activation_context_in_forward()
+                    self._update_current_activation_context_in_forward()
                 else:
                     logger.info(
                         "Skipping forward pre hook, in the backward"
@@ -574,7 +574,7 @@ class TensorCache:
                     return
                 else:
                     # First, update the current ActivationContext
-                    self.update_current_activation_context_in_forward()
+                    self._update_current_activation_context_in_forward()
 
             logger.info(f"Forward hook for {get_oneline_str(m)}({id(m)})")
             # The runtime has finished the forward logic within module m.
@@ -596,7 +596,7 @@ class TensorCache:
             )
             if self.enable_activation_context_recording:
                 activation_context = (
-                    self.check_done_activation_context_in_backward(m)
+                    self._check_done_activation_context_in_backward(m)
                 )
                 if activation_context:
                     with self.lock:
@@ -695,7 +695,7 @@ class TensorCache:
                     return tensor
                 else:
                     # First, update the current ActivationContext
-                    self.update_current_activation_context_in_forward()
+                    self._update_current_activation_context_in_forward()
 
             # We need to ensure thread-safety.
             with self.lock:
@@ -755,7 +755,7 @@ class TensorCache:
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
-                    self.update_current_activation_context_in_forward()
+                    self._update_current_activation_context_in_forward()
             # Skip parameters because they will stay in memory always.
             if isinstance(tensor_id_or_tensor, torch.Tensor):
                 if (
