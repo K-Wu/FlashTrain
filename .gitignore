@@ -35,3 +35,5 @@ flexgen/apps/data_wrangle/core
 today_job.sh
 
 *.dot
+
+*.json
