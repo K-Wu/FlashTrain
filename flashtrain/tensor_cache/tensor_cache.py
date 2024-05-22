@@ -277,29 +277,29 @@ class TensorCache:
 
     def add_parameters_from_module(self, model: torch.nn.Module):
         self.parameters_and_inputs = self.parameters_and_inputs.union(
-            {TensorEqID.from_tensor(p.data) for p in model.parameters()}
+            {TensorEqID.from_tensor(p.data, None) for p in model.parameters()}
         )
         logger.info(
             "Added parameters to cache"
-            f" {get_oneline_str(*{TensorEqID.from_tensor(p.data) for p in model.parameters()})}"
+            f" {get_oneline_str(*{TensorEqID.from_tensor(p.data, None) for p in model.parameters()})}"
         )
 
     def add_inputs_or_parameters(self, *inputs: torch.Tensor):
         self.parameters_and_inputs = self.parameters_and_inputs.union(
-            {TensorEqID.from_tensor(input) for input in inputs}
+            {TensorEqID.from_tensor(input, None) for input in inputs}
         )
         logger.info(
             "Added inputs or parameters to cache"
-            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input)) for input in inputs}))}"
+            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input, None)) for input in inputs}))}"
         )
 
     def del_inputs_or_parameters(self, *inputs: torch.Tensor):
         self.parameters_and_inputs = self.parameters_and_inputs.difference(
-            {TensorEqID.from_tensor(input) for input in inputs}
+            {TensorEqID.from_tensor(input, None) for input in inputs}
         )
         logger.info(
             "Deleted inputs or parameters from cache"
-            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input)) for input in inputs}))}"
+            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input, None)) for input in inputs}))}"
         )
 
     def set_in_forward(self):
@@ -526,7 +526,7 @@ class TensorCache:
                 self.module_id_to_module[id(m)] = weakref.ref(m)
             else:
                 logger.warning(
-                    f"Module {get_oneline_str(m)}(id(m)) already exists in"
+                    f"Module {get_oneline_str(m)}({id(m)}) already exists in"
                     " self.module_id_to_module"
                 )
                 self.module_id_to_reenter_count[id(m)] = (
@@ -589,7 +589,7 @@ class TensorCache:
 
         return forward_hook
 
-    def get_backward_pre_hook(self) -> Callable[..., None]:
+    def get_full_backward_pre_hook(self) -> Callable[..., None]:
         def full_backward_pre_hook(m, grad_output) -> None:
             logger.info(
                 f"Full backward pre hook for ({id(m)}) {get_oneline_str(m)}"
@@ -609,7 +609,7 @@ class TensorCache:
 
         return full_backward_pre_hook
 
-    def get_backward_hook(self) -> Callable[..., None]:
+    def get_full_backward_hook(self) -> Callable[..., None]:
         def all_is_none(grad_input):
             return all(g is None for g in grad_input)
 
@@ -677,7 +677,7 @@ class TensorCache:
             """
             Register the tensors that are saved for backward in the forward pass.
             """
-            tensor_id = TensorEqID.from_tensor(tensor)
+            tensor_id = TensorEqID.from_tensor(tensor, None)
 
             if tensor.device.type == "cpu":
                 # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
@@ -759,20 +759,20 @@ class TensorCache:
             # Skip parameters because they will stay in memory always.
             if isinstance(tensor_id_or_tensor, torch.Tensor):
                 if (
-                    TensorEqID.from_tensor(tensor_id_or_tensor)
+                    TensorEqID.from_tensor(tensor_id_or_tensor, None)
                     in self.parameters_and_inputs
                 ):
                     logger.info(
-                        "Tensor cache skips unpacking, due to parameters"
-                        " and inputs,"
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        "Tensor cache skips unpacking, due to parameters and"
+                        " inputs,"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, None)},"
                         f" {tensor_id_or_tensor.shape}"
                     )
                 else:
                     logger.info(
                         "Tensor cache skips unpacking, due to activation"
                         " recomputing,"
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor)},"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, None)},"
                         f" {tensor_id_or_tensor.shape}"
                     )
                 return tensor_id_or_tensor

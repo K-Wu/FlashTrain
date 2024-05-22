@@ -50,9 +50,9 @@ def run(args, use_cache=True):
         register_transpose_of_linear_weights(bert, tensor_cache)
 
         forward_hook = tensor_cache.get_forward_hook()
-        backward_hook = tensor_cache.get_backward_hook()
+        backward_hook = tensor_cache.get_full_backward_hook()
         forward_pre_hook = tensor_cache.get_forward_pre_hook()
-        backward_pre_hook = tensor_cache.get_backward_pre_hook()
+        backward_pre_hook = tensor_cache.get_full_backward_pre_hook()
         pack_hook = tensor_cache.get_pack_hook()
         unpack_hook = tensor_cache.get_unpack_hook()
 

@@ -2,10 +2,17 @@ import torch
 import os
 from dataclasses import dataclass
 from ..logger import logger
+import logging
+import threading
+import contextlib
 
 
-def get_oneline_str(*args) -> str:
-    reprs = [str(arg).replace("\n", "↵") for arg in args]
+def get_oneline_str(*args, debug_only: bool = False) -> str:
+    # If level higher than DEBUG
+    if (not debug_only) or logger.level <= logging.DEBUG:
+        reprs = [str(arg).replace("\n", "↵") for arg in args]
+    else:
+        reprs = [""]
     return " ".join(reprs)
 
 
@@ -30,20 +37,12 @@ class TensorEqID:  # (dataobject):
     device: torch.device
 
     @classmethod
-    def from_tensor(cls, tensor: torch.Tensor):
-        import sys
-
+    def from_tensor(
+        cls, tensor: torch.Tensor, lock: "threading.Lock | None" = None
+    ):
         # We have to use id(tensor) because the underlying storage will be unused when the tensor is released, causing collision if the new tensor has the same shape and stride.
-        if sys.getrefcount(tensor.untyped_storage()) > 1:
-            logger.warning(
-                f"The storage of {tensor} is shared by multiple tensors."
-            )
-            data_ptr = (
-                tensor.untyped_storage().data_ptr(),
-                0,  # reserved
-            )
-        else:
-            data_ptr = id(tensor.data)
+        data_ptr = id(tensor.data)
+
         return cls(
             data_ptr=data_ptr,
             dtype=tensor.dtype,
