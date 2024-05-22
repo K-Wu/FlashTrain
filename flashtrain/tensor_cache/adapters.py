@@ -2,7 +2,7 @@ import kvikio
 import cupy
 import torch
 from ..logger import logger
-from .utils import TensorEqID
+from .utils import TensorEqID, get_oneline_str
 import concurrent.futures
 import threading
 from typing import Any
@@ -134,10 +134,13 @@ class KvikioIOAdapter(AdapterBase):
         """
         # tensor_cupy = cupy.asarray(tensor)
         # Issue at https://github.com/cupy/cupy/issues/7144
-        tensor_cupy = cupy.from_dlpack(tensor.detach())
+        tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
         with kvikio.CuFile(path, "w") as f:
             f.write(tensor_cupy)
-        logger.info(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
+        logger.info(
+            "Kvikio Saved tensor"
+            f" {get_oneline_str(tensor_cupy)} ({TensorEqID.from_tensor(tensor)})"
+        )
 
     def load_tensor(
         self,
@@ -150,10 +153,12 @@ class KvikioIOAdapter(AdapterBase):
         Load the tensor from the file.
         """
         tensor = torch.empty(shape, dtype=dtype, device=device)
-        tensor_cupy = cupy.asarray(tensor)
+        # tensor_cupy = cupy.asarray(tensor)
         with kvikio.CuFile(path, "r") as f:
-            f.read(tensor_cupy)
-        logger.info(f"Kvikio Loading tensor from path {path}")
+            f.read(tensor)
+        logger.info(
+            f"Kvikio Loading tensor {get_oneline_str(tensor)} from path {path}"
+        )
         return tensor
 
     # TODO: implement clean_up_when_end to delete files
