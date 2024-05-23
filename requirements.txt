@@ -12,3 +12,4 @@ deepspeed==0.14.2
 nltk
 sentencepiece
 einops
+hypothesis
