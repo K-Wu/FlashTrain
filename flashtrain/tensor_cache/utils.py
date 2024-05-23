@@ -6,6 +6,7 @@ import logging
 import threading
 import contextlib
 import time
+from typing import Optional
 
 
 def get_oneline_str(*args, debug_only: bool = False) -> str:
@@ -41,7 +42,7 @@ class TensorEqID:  # (dataobject):
     def from_tensor(
         cls,
         tensor: torch.Tensor,
-        lock: "threading.Lock | None" = None,
+        lock: "Optional[threading.Lock]" = None,
         assert_get=False,
         use_timestamp_as_data_ptr=True,
     ):
@@ -74,7 +75,7 @@ class TensorEqID:  # (dataobject):
 
     @classmethod
     def get_from_tensor(
-        cls, tensor: torch.Tensor, lock: "threading.Lock | None" = None
+        cls, tensor: torch.Tensor, lock: "Optional[threading.Lock]" = None
     ):
         return cls.from_tensor(tensor, assert_get=True, lock=lock)
 

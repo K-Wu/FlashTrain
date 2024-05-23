@@ -122,13 +122,28 @@ def is_torch_activation_checkpoint_in_traceback():
     )
 
 
+def is_deepspeed_megatron_activation_checkpoint_in_traceback():
+    #  megatron/core/tensor_parallel/random.py contains checkpoint logic, checkpoint entry, and auxiliary functions like set seeds. If we get a traceback within this file, we are in the checkpoint region.
+    trace_stack = [line.strip() for line in traceback.format_stack()][:-1]
+    return any(
+        [
+            os.path.join("megatron", "core", "tensor_parallel", "random.py")
+            in line
+            for line in trace_stack
+        ]
+    )
+
+
 def dummy_pack_hook(tensor):
     logger.info(
         f"Dummy pack hook for {TensorEqID.from_tensor(tensor)}. Traceback"
         f" {get_oneline_str(*['    ' + line.strip() for line in traceback.format_stack()][:-1])}"
     )
 
-    if is_torch_activation_checkpoint_in_traceback():
+    if (
+        is_torch_activation_checkpoint_in_traceback()
+        or is_deepspeed_megatron_activation_checkpoint_in_traceback()
+    ):
         logger.info(
             "Dummy pack hook in checkpoint"
             f" {get_torch_activation_checkpoint_caller_filename_and_line()}"
@@ -364,7 +379,10 @@ class TensorCache:
         assert self.enable_activation_context_recording
 
         assert not self.current_in_backward
-        if is_torch_activation_checkpoint_in_traceback():
+        if (
+            is_torch_activation_checkpoint_in_traceback()
+            or is_deepspeed_megatron_activation_checkpoint_in_traceback()
+        ):
             (
                 filename,
                 lineno,
@@ -435,7 +453,7 @@ class TensorCache:
 
     def _check_done_activation_context_in_backward(
         self, backward_pre_hook_target: torch.nn.Module | None
-    ) -> None | ActivationContext:
+    ) -> ActivationContext | None:
         # In backward propagation, the checkpoint region is triggered if any of its module within it is triggered or any of the tensor within it is unpacked. To detect this, we need to maintain dictionary mapping from module id (+reentrent) to activation context and from tensor to activation context. This is not needed because there is no need to maintain which activation context we are currently in when we are in the backward pass, but only which activation context we have done.
         """In backward propagation, the checkpoint region is done after all modules within it are done and the backward process of the previous (in forward propagation) layer is triggered. To detect this, we need to maintain activation context to modules and previous-module to activation context."""
         assert self.enable_activation_context_recording
