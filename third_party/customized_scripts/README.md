@@ -17,9 +17,21 @@ Reference: [NERSC Support Incident - INC0219834](https://nersc.servicenowservice
 
 [Another example that used Slurm with Torchrun for DeepSpeed](https://github.com/woojinsoh/Megatron-DeepSpeed-Slurm/blob/master/megatron_ds_mnmg.slurm)
 
-# Slurm with DeepSpeed Launcher
+## Slurm with DeepSpeed Launcher
 Don't use srun with DeepSpeed launcher. Confirmed successful usage include srun + torchrun in multi-node and deepspeed in single-node. Check the following thread for more details.
 
 ["I couldn't make it work with the deepspeed launcher" and "The deepspeed launcher is totally optional and has nothing to do with Deepspeed's features."](https://github.com/microsoft/DeepSpeed/issues/2025)
 
 [Single-node example and multiple-node with slurm example](https://github.com/bigscience-workshop/Megatron-DeepSpeed/?tab=readme-ov-file#gpt-pretraining)
+
+## Pushing a Detached HEAD
+
+When contributing to the submodule, it is possible that a detached HEAD is created. To push the changes to the submodule, use the following command:
+
+```
+git push origin HEAD:main
+```
+
+And then update the submodule in the parent repository.
+
+Reference: https://stackoverflow.com/a/52338714/5555077
