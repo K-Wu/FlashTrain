@@ -9,6 +9,8 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
 )
 from ..tensor_cache import tensor_cache as TC
+from ..tensor_cache import pipeline_tensor_cache as PTC
+from ..tensor_cache.pipeline_tensor_cache import Stage
 from ..tensor_cache import adapters
 import torch.utils.checkpoint as checkpoint
 import logging
@@ -21,6 +23,7 @@ from ..utils import (
     get_sequence_of_layers,
     register_transpose_of_linear_weights,
 )
+from typing import Any
 
 
 class SimpleModel(nn.Module):
@@ -59,6 +62,7 @@ class SimpleModelTestWithCache(TestCase):
         use_recursive_do=True,
         debug_viz=False,
         use_checkpoint=True,
+        enable_microbatch=True,
         adapter_type="kvikio",
     ) -> None:
         torch.manual_seed(0)
@@ -70,40 +74,52 @@ class SimpleModelTestWithCache(TestCase):
         optim_withcache = torch.optim.Adam(
             model_withcache.parameters(), lr=0.01
         )
+
+        tensor_cache_args: dict[str, Any]
         if adapter_type == "main_memory":
-            tensor_cache = TC.TensorCache(
-                enable_activation_context_recording=use_checkpoint,
-                adapter=adapters.TorchMainMemoryIOAdapter(),
-            )
+            tensor_cache_args = {
+                "enable_activation_context_recording": use_checkpoint,
+                "adapter": adapters.TorchMainMemoryIOAdapter(),
+            }
         elif adapter_type == "kvikio":
-            tensor_cache = TC.TensorCache(
-                enable_activation_context_recording=use_checkpoint,
-                adapter=adapters.KvikioIOAdapter(),
-            )
+            tensor_cache_args = {
+                "enable_activation_context_recording": use_checkpoint,
+                "adapter": adapters.KvikioIOAdapter(),
+            }
         elif adapter_type == "revolver":
-            tensor_cache = TC.TensorCache(
-                enable_activation_context_recording=use_checkpoint,
-                adapter=adapters.RevolverIOAdapter(
+            tensor_cache_args = {
+                "enable_activation_context_recording": use_checkpoint,
+                "adapter": adapters.RevolverIOAdapter(
                     [
                         TC.TorchBuiltinIOAdapter(),
                         adapters.TorchMainMemoryIOAdapter(),
                     ]
                 ),
-            )
+            }
         else:
             assert adapter_type == "native"
-            tensor_cache = TC.TensorCache(
-                enable_activation_context_recording=use_checkpoint,
-            )
+            tensor_cache_args = {
+                "enable_activation_context_recording": use_checkpoint,
+            }
+
+        if enable_microbatch:
+            tensor_cache_args["num_microbatches"] = 2
+            tensor_cache = PTC.PipelineTensorCache(**tensor_cache_args)
+            tensor_caches = tensor_cache.tensor_caches
+        else:
+            tensor_cache = TC.TensorCache(**tensor_cache_args)
+            tensor_caches = [tensor_cache]
         tensor_cache.add_parameters_from_module(model_withcache)
         if use_recursive_do:
-            register_transpose_of_linear_weights(model_withcache, tensor_cache)
+            for tc_ in tensor_caches:
+                register_transpose_of_linear_weights(model_withcache, tc_)
         else:
-            tensor_cache.add_inputs_or_parameters(
-                model_withcache.net1.weight.transpose(0, 1),
-                model_withcache.net2.weight.transpose(0, 1),
-                model_withcache.net3.weight.transpose(0, 1),
-            )
+            for tc_ in tensor_caches:
+                tc_.add_inputs_or_parameters(
+                    model_withcache.net1.weight.transpose(0, 1),
+                    model_withcache.net2.weight.transpose(0, 1),
+                    model_withcache.net3.weight.transpose(0, 1),
+                )
 
         forward_pre_hook = tensor_cache.get_forward_pre_hook()
         forward_hook = tensor_cache.get_forward_hook()
@@ -150,8 +166,12 @@ class SimpleModelTestWithCache(TestCase):
         for i in range(5):
             logger.info(f"Iteration {i}")
             # Ensure all input across TP ranks are same.
-            # TODO: add a get_group_rank() to DeviceMesh.
-            tensor_cache.set_in_forward()
+            if not enable_microbatch:
+                assert isinstance(tensor_cache, TC.TensorCache)
+                tensor_cache.set_in_forward()
+            else:
+                assert isinstance(tensor_cache, PTC.PipelineTensorCache)
+                tensor_cache.set_stage(0, Stage.FORWARD)
             torch.manual_seed(i)
             input = torch.rand(4, 5).cuda()
             input_withcache = input.clone().detach()
@@ -160,20 +180,22 @@ class SimpleModelTestWithCache(TestCase):
             input_withcache.requires_grad = True
             tensor_cache.add_inputs_or_parameters(input_withcache)
 
-            # Check if the TensorEqID is working as expected
-            assert TC.TensorEqID.from_tensor(
-                input_withcache
-            ) == TC.TensorEqID.from_tensor(input_withcache)
-            assert hash(TC.TensorEqID.from_tensor(input_withcache)) == hash(
-                TC.TensorEqID.from_tensor(input_withcache)
-            )
-            assert TC.TensorEqID.from_tensor(input_withcache) in {
-                TC.TensorEqID.from_tensor(input_withcache)
-            }
-            assert (
-                TC.TensorEqID.from_tensor(input_withcache)
-                in tensor_cache.parameters_and_inputs
-            )
+            if not enable_microbatch:
+                # Check if the TensorEqID is working as expected
+                assert TC.TensorEqID.from_tensor(
+                    input_withcache
+                ) == TC.TensorEqID.from_tensor(input_withcache)
+                assert hash(
+                    TC.TensorEqID.from_tensor(input_withcache)
+                ) == hash(TC.TensorEqID.from_tensor(input_withcache))
+                assert TC.TensorEqID.from_tensor(input_withcache) in {
+                    TC.TensorEqID.from_tensor(input_withcache)
+                }
+                assert isinstance(tensor_cache, TC.TensorCache)
+                assert (
+                    TC.TensorEqID.from_tensor(input_withcache)
+                    in tensor_cache.parameters_and_inputs
+                )
 
             output = model(input)
             loss = output.sum()
@@ -197,15 +219,37 @@ class SimpleModelTestWithCache(TestCase):
                     output_withcache = model_withcache(input_withcache)
 
                 loss_withcache = output_withcache.sum()
-                tensor_cache.set_in_backward()
+                if not enable_microbatch:
+                    assert isinstance(tensor_cache, TC.TensorCache)
+                    tensor_cache.set_in_backward()
+                else:
+                    assert isinstance(tensor_cache, PTC.PipelineTensorCache)
+                    tensor_cache.set_stage(0, Stage.BACKWARD)
                 loss_withcache.backward()
+                if enable_microbatch:
+                    # Do another batch and then accumulate the gradients.
+                    assert isinstance(tensor_cache, PTC.PipelineTensorCache)
+                    tensor_cache.set_stage(1, Stage.FORWARD)
+                    input = torch.rand(4, 5).cuda()
+                    if use_checkpoint and i % 2 == 0:
+                        # Test accumulation of pass with checkpointing and without.
+                        output_withcache = checkpoint.checkpoint(
+                            model_withcache, input, use_reentrant=False
+                        )
+                    else:
+                        output_withcache = model_withcache(input)
+                    loss_withcache = output_withcache.sum()
+                    tensor_cache.set_stage(1, Stage.BACKWARD)
+                    loss_withcache.backward()
 
             optim_withcache.step()
-            self.assertEqual(output, output_withcache)
+            if not enable_microbatch:
+                self.assertEqual(output, output_withcache)
         logger.info("Iterations end.")
-        self.assertEqual(model(input), model_withcache(input))
 
-        self._compare_params(model, model_withcache)
+        if not enable_microbatch:
+            self.assertEqual(model(input), model_withcache(input))
+            self._compare_params(model, model_withcache)
 
         if debug_viz:
             from torchviz import make_dot

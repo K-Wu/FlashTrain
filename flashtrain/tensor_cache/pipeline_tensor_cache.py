@@ -26,10 +26,10 @@ class PipelineTensorCache:
     tensor_caches_unpack_hook: list[Callable[[Any], torch.Tensor]]
     current_microbatch_idx: int
 
-    def __init__(self, num_minibatches: int, *args, **kwargs):
-        # The __init__ method uses num_minibatches to determine the number of tensor caches to create. And it pass all the arguments and keyword arguments to the TensorCache class.
+    def __init__(self, num_microbatches: int, *args, **kwargs):
+        # The __init__ method uses num_microbatches to determine the number of tensor caches to create. And it pass all the arguments and keyword arguments to the TensorCache class.
         self.tensor_caches = [
-            TensorCache(*args, **kwargs) for _ in range(num_minibatches)
+            TensorCache(*args, **kwargs) for _ in range(num_microbatches)
         ]
         self.tensor_caches_forward_pre_hook = [
             tensor_cache.get_forward_pre_hook()
@@ -58,7 +58,7 @@ class PipelineTensorCache:
         self.current_microbatch_idx = 0
 
     def __del__(self):
-        for idx in range(len(self.tensor_caches)):
+        for idx in reversed(range(len(self.tensor_caches))):
             del self.tensor_caches_forward_hook[idx]
             del self.tensor_caches_forward_pre_hook[idx]
             del self.tensor_caches_full_backward_hook[idx]
