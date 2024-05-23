@@ -47,7 +47,11 @@ class TorchBuiltinIOAdapter(AdapterBase):
         Save the tensor to the file.
         """
         torch.save(tensor, path)
-        logger.info(f"Saved tensor {TensorEqID.from_tensor(tensor)} to {path}")
+        logger.info(
+            "Saved tensor"
+            f" {get_oneline_str(tensor)} ({TensorEqID.get_from_tensor(tensor)})"
+            f" to {path}"
+        )
 
     def load_tensor(
         self,
@@ -60,9 +64,11 @@ class TorchBuiltinIOAdapter(AdapterBase):
         Load the tensor from the file.
         """
         # We rely on torch.load to determine the device of the tensor as the device it was originally on when saved was serialized into the file as well.
-
-        logger.info(f"Loading tensor from path {path}")
-        return torch.load(path)
+        tensor = torch.load(path)
+        logger.info(
+            f"Loading tensor {get_oneline_str(tensor)} from path {path}"
+        )
+        return tensor
 
     # TODO: implement clean_up_when_end to delete files
 
@@ -277,29 +283,29 @@ class TensorCache:
 
     def add_parameters_from_module(self, model: torch.nn.Module):
         self.parameters_and_inputs = self.parameters_and_inputs.union(
-            {TensorEqID.from_tensor(p.data, None) for p in model.parameters()}
+            {TensorEqID.from_tensor(p) for p in model.parameters()}
         )
         logger.info(
             "Added parameters to cache"
-            f" {get_oneline_str(*{TensorEqID.from_tensor(p.data, None) for p in model.parameters()})}"
+            f" {get_oneline_str(*{TensorEqID.get_from_tensor(p) for p in model.parameters()})}"
         )
 
     def add_inputs_or_parameters(self, *inputs: torch.Tensor):
         self.parameters_and_inputs = self.parameters_and_inputs.union(
-            {TensorEqID.from_tensor(input, None) for input in inputs}
+            {TensorEqID.from_tensor(input) for input in inputs}
         )
         logger.info(
             "Added inputs or parameters to cache"
-            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input, None)) for input in inputs}))}"
+            f" {get_oneline_str(', '.join({str(TensorEqID.get_from_tensor(input)) for input in inputs}))}"
         )
 
     def del_inputs_or_parameters(self, *inputs: torch.Tensor):
         self.parameters_and_inputs = self.parameters_and_inputs.difference(
-            {TensorEqID.from_tensor(input, None) for input in inputs}
+            {TensorEqID.get_from_tensor(input) for input in inputs}
         )
         logger.info(
             "Deleted inputs or parameters from cache"
-            f" {get_oneline_str(', '.join({str(TensorEqID.from_tensor(input, None)) for input in inputs}))}"
+            f" {get_oneline_str(', '.join({str(TensorEqID.get_from_tensor(input)) for input in inputs}))}"
         )
 
     def set_in_forward(self):
@@ -677,7 +683,9 @@ class TensorCache:
             """
             Register the tensors that are saved for backward in the forward pass.
             """
-            tensor_id = TensorEqID.from_tensor(tensor, None)
+            tensor_id = TensorEqID.from_tensor(
+                tensor, self.lock if self.current_in_backward else None
+            )
 
             if tensor.device.type == "cpu":
                 # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
@@ -759,20 +767,20 @@ class TensorCache:
             # Skip parameters because they will stay in memory always.
             if isinstance(tensor_id_or_tensor, torch.Tensor):
                 if (
-                    TensorEqID.from_tensor(tensor_id_or_tensor, None)
+                    TensorEqID.get_from_tensor(tensor_id_or_tensor)
                     in self.parameters_and_inputs
                 ):
                     logger.info(
                         "Tensor cache skips unpacking, due to parameters and"
                         " inputs,"
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, None)},"
+                        f" {TensorEqID.get_from_tensor(tensor_id_or_tensor)},"
                         f" {tensor_id_or_tensor.shape}"
                     )
                 else:
                     logger.info(
                         "Tensor cache skips unpacking, due to activation"
                         " recomputing,"
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, None)},"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, self.lock)},"
                         f" {tensor_id_or_tensor.shape}"
                     )
                 return tensor_id_or_tensor

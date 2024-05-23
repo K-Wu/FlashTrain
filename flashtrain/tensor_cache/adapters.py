@@ -139,7 +139,7 @@ class KvikioIOAdapter(AdapterBase):
             f.write(tensor_cupy)
         logger.info(
             "Kvikio Saved tensor"
-            f" {get_oneline_str(tensor_cupy)} ({TensorEqID.from_tensor(tensor)})"
+            f" {get_oneline_str(tensor_cupy, True)} ({TensorEqID.from_tensor(tensor)})"
         )
 
     def load_tensor(
@@ -157,7 +157,8 @@ class KvikioIOAdapter(AdapterBase):
         with kvikio.CuFile(path, "r") as f:
             f.read(tensor)
         logger.info(
-            f"Kvikio Loading tensor {get_oneline_str(tensor)} from path {path}"
+            f"Kvikio Loading tensor {get_oneline_str(tensor, True)} from path"
+            f" {path}"
         )
         return tensor
 

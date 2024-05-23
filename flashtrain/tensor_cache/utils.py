@@ -5,6 +5,7 @@ from ..logger import logger
 import logging
 import threading
 import contextlib
+import time
 
 
 def get_oneline_str(*args, debug_only: bool = False) -> str:
@@ -30,7 +31,7 @@ class SelfDeletingTempFile:
 class TensorEqID:  # (dataobject):
     """When PyTorch packs/unpacks tensors to/from computation graph, identical tensors may be wrapped by different Tensor objects to avoid cyclic reference. This class serves to determine if the underlying tensors are identical."""
 
-    data_ptr: int | tuple[int, ...]
+    data_ptr: float | int | tuple[int, ...]
     dtype: torch.dtype
     shape: tuple[int, ...]
     stride: tuple[int, ...]
@@ -38,10 +39,30 @@ class TensorEqID:  # (dataobject):
 
     @classmethod
     def from_tensor(
-        cls, tensor: torch.Tensor, lock: "threading.Lock | None" = None
+        cls,
+        tensor: torch.Tensor,
+        lock: "threading.Lock | None" = None,
+        assert_get=False,
+        use_timestamp_as_data_ptr=True,
     ):
-        # We have to use id(tensor) because the underlying storage will be unused when the tensor is released, causing collision if the new tensor has the same shape and stride.
-        data_ptr = id(tensor.data)
+        # We have to use timestamp or id(tensor) because the underlying storage will be unused when the tensor is released, causing collision if the new tensor has the same shape and stride.
+        if lock is not None:
+            cm = lock
+        else:
+            cm = contextlib.nullcontext()
+        with cm:
+            if use_timestamp_as_data_ptr:
+                if assert_get:
+                    assert hasattr(tensor, "timestamp")
+                    data_ptr = tensor.timestamp
+                else:
+                    if hasattr(tensor, "timestamp"):
+                        data_ptr = tensor.timestamp
+                    else:
+                        tensor.timestamp = time.time()
+                        data_ptr = tensor.timestamp
+            else:
+                data_ptr = id(tensor.data)
 
         return cls(
             data_ptr=data_ptr,
@@ -51,12 +72,19 @@ class TensorEqID:  # (dataobject):
             device=tensor.device,
         )
 
+    @classmethod
+    def get_from_tensor(
+        cls, tensor: torch.Tensor, lock: "threading.Lock | None" = None
+    ):
+        return cls.from_tensor(tensor, assert_get=True, lock=lock)
+
     def __str__(self):
-        data_ptr_str = (
-            f"{self.data_ptr[0]:x}.{self.data_ptr[1]}"
-            if isinstance(self.data_ptr, tuple)
-            else f"{self.data_ptr:x}"
-        )
+        if isinstance(self.data_ptr, tuple):
+            data_ptr_str = f"{self.data_ptr[0]:x}.{self.data_ptr[1]}"
+        elif isinstance(self.data_ptr, int):
+            data_ptr_str = f"{self.data_ptr:x}"
+        else:
+            data_ptr_str = str(self.data_ptr)
         stride_str = ".".join(map(str, self.stride))
         shape_str = ".".join(map(str, self.shape))
         return (
