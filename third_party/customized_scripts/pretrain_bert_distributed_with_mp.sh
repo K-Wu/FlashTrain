@@ -1,6 +1,6 @@
 #!/bin/bash
 # Adapted from https://github.com/microsoft/Megatron-DeepSpeed/blob/94dbfd1cd35fea44f3a504722060bee4962816e8/examples/pretrain_bert_distributed_with_mp.sh (forked from github.com/microsoft/Megatron-DeepSpeed/) with dataset and tokernizer path changed according to the working datasets specified in test_load_datasets.py
-
+# Incorporated arguments from https://github.com/microsoft/Megatron-DeepSpeed/blob/main/examples_deepspeed/data_efficiency/bert/pretrain/ds_pretrain_bert_336M_base_script.sh#L13
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 GPUS_PER_NODE=2
@@ -10,6 +10,84 @@ MASTER_PORT=6000
 NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
+
+
+# Change the below configurations here
+BASE_PATH=./tmp
+# Create the directory in order to save the deepspeed.json file
+mkdir -p $BASE_PATH
+DS_CONFIG=${BASE_PATH}/deepspeed.json
+GLOBAL_BATCH_SIZE=16
+MICRO_BATCH_SIZE=2
+ZERO_STAGE=0
+
+
+## In addition, we find that the 3.9B model (even after tuning INIT_STD) has
+## NaN loss issue from the beginning thus unable to train. This is probably
+## because in this example we use the public Pile data, which is a more diverse
+## (and potentially more noisy) data than what used in Megatron paper. One
+## potential solution is only use the sub datasets in Pile that are also
+## used by Megatron paper.
+
+## BERT 110M (same config as original BERT-Base model)
+## This config is not included in Megatron-LM paper
+# NUM_LAYERS=12
+# HIDDEN_SIZE=768
+# NUM_ATTN_HEADS=12
+# INIT_STD=0.02
+
+## BERT 336M (same config as original BERT-Large model)
+NUM_LAYERS=24
+HIDDEN_SIZE=1024
+NUM_ATTN_HEADS=16
+INIT_STD=0.02
+
+## BERT 1.3B
+# NUM_LAYERS=24
+# HIDDEN_SIZE=2048
+# NUM_ATTN_HEADS=32
+# INIT_STD=0.013
+
+## BERT 3.9B
+# NUM_LAYERS=48
+# HIDDEN_SIZE=2560
+# NUM_ATTN_HEADS=40
+# INIT_STD=0.011
+
+
+## Activation checkpointing saves GPU memory, but reduces training speed
+# ACTIVATION_CHECKPOINT="true"
+ACTIVATION_CHECKPOINT="false"
+
+LTD_ENABLED="false"
+
+
+ENABLE_DEEPSPEED="false"
+ds_args=""
+if [ "$ENABLE_DEEPSPEED" = "true" ]; then
+cat <<EOT > $DS_CONFIG
+{
+  "train_batch_size" : $GLOBAL_BATCH_SIZE,
+  "train_micro_batch_size_per_gpu": $MICRO_BATCH_SIZE,
+  "steps_per_print": 1,
+  "zero_optimization": {
+    "stage": $ZERO_STAGE
+  },
+  "bf16": {
+    "enabled": true
+  }
+}
+EOT
+
+ds_args=" --deepspeed ${ds_args}"
+ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
+ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
+
+if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+  ds_args="--deepspeed-activation-checkpointing ${ds_args}"
+fi
+fi
+
 
 CHECKPOINT_PATH=./tmp
 VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
@@ -26,13 +104,14 @@ DISTRIBUTED_ARGS="
 BERT_ARGS="
     --bert-no-binary-head \
     --tensor-model-parallel-size 2 \
-    --num-layers 24 \
-    --hidden-size 1024 \
-    --num-attention-heads 16 \
+    --num-layers ${NUM_LAYERS} \
+    --hidden-size ${HIDDEN_SIZE} \
+    --num-attention-heads ${NUM_ATTN_HEADS} \
+    --init-method-std ${INIT_STD} \
     --seq-length 512 \
     --max-position-embeddings 512 \
-    --micro-batch-size 2 \
-    --global-batch-size 16 \
+    --micro-batch-size $MICRO_BATCH_SIZE \
+    --global-batch-size $GLOBAL_BATCH_SIZE \
     --lr 0.0001 \
     --train-iters 1000 \
     --lr-decay-iters 990 \
@@ -43,6 +122,19 @@ BERT_ARGS="
     --clip-grad 1.0 \
     --fp16
 "
+
+if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+BERT_ARGS="${BERT_ARGS} \
+    --checkpoint-activations"
+fi
+
+if [ "${LTD_ENABLED}" = "true" ]; then
+BERT_ARGS="${BERT_ARGS} \
+    --attention-dropout ${dropout} \
+    --hidden-dropout ${dropout} \
+    --random-ltd"
+fi
+
 
 DATA_ARGS="
     --data-path $DATA_PATH \
@@ -64,4 +156,5 @@ torchrun $DISTRIBUTED_ARGS pretrain_bert.py \
     $OUTPUT_ARGS \
     --distributed-backend nccl \
     --save $CHECKPOINT_PATH \
-    --load $CHECKPOINT_PATH
+    --load $CHECKPOINT_PATH \
+    $ds_args
