@@ -152,6 +152,7 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 
 torchrun $DISTRIBUTED_ARGS \
        pretrain_gpt.py \
+       --enable-tensor-cache \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \
        $hyperparam_args \

@@ -102,6 +102,7 @@ DISTRIBUTED_ARGS="
 "
 
 BERT_ARGS="
+    --enable-tensor-cache \
     --bert-no-binary-head \
     --tensor-model-parallel-size 2 \
     --num-layers ${NUM_LAYERS} \

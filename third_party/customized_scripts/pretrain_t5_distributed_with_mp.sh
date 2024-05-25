@@ -24,6 +24,7 @@ DISTRIBUTED_ARGS="
 "
 
 T5_ARGS="
+    --enable-tensor-cache \
     --tensor-model-parallel-size 2 \
     --num-layers 12 \
     --decoder-num-layers 12 \
