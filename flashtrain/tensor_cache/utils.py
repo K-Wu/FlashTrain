@@ -1,21 +1,10 @@
 import torch
 import os
 from dataclasses import dataclass
-from ..logger import logger
-import logging
 import threading
 import contextlib
 import time
 from typing import Optional
-
-
-def get_oneline_str(*args, debug_only: bool = False) -> str:
-    # If level higher than DEBUG
-    if (not debug_only) or logger.level <= logging.DEBUG:
-        reprs = [str(arg).replace("\n", "↵") for arg in args]
-    else:
-        reprs = [""]
-    return " ".join(reprs)
 
 
 # TODO: Use SelfDeletingTempFile instead of plain str in tensor_cache's tensor_id_to_filename

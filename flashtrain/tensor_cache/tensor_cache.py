@@ -13,9 +13,9 @@ import concurrent.futures
 import threading
 import contextlib
 import traceback
-from ..logger import logger
-from .utils import get_oneline_str, TensorEqID
-from .adapters import create_new_filename, AdapterBase
+from ..logger import logger, get_oneline_str
+from .utils import TensorEqID
+from .adapters import AdapterBase, TorchBuiltinIOAdapter
 from dataclasses import dataclass
 
 
@@ -24,53 +24,6 @@ def get_process_descriptor() -> str:
         return f"{socket.gethostname()}_rank{torch.distributed.get_rank()}"
     else:
         return f"{socket.gethostname()}"
-
-
-class TorchBuiltinIOAdapter(AdapterBase):
-    path: str
-
-    def __init__(self, path: str = "/tmp"):
-        self.path = path
-
-    def create_new_filename(
-        self,
-        identifier: str,  # Used to distinguish tensors among distributed processes.
-        tensor: torch.Tensor,
-    ):
-        """
-        Create a filename for a new file when storing tensor on the device.
-        """
-        return create_new_filename(identifier, tensor, self.path)
-
-    def save_tensor(self, tensor: torch.Tensor, path: str):
-        """
-        Save the tensor to the file.
-        """
-        torch.save(tensor, path)
-        logger.info(
-            "Saved tensor"
-            f" {get_oneline_str(tensor)} ({TensorEqID.get_from_tensor(tensor)})"
-            f" to {path}"
-        )
-
-    def load_tensor(
-        self,
-        path: str,
-        shape: torch.Size,
-        dtype: torch.dtype,
-        device: torch.device,
-    ):
-        """
-        Load the tensor from the file.
-        """
-        # We rely on torch.load to determine the device of the tensor as the device it was originally on when saved was serialized into the file as well.
-        tensor = torch.load(path)
-        logger.info(
-            f"Loading tensor {get_oneline_str(tensor)} from path {path}"
-        )
-        return tensor
-
-    # TODO: implement clean_up_when_end to delete files
 
 
 def del_dict_key_if_exists(d: dict, key: ..., lock: "threading.Lock | None"):
@@ -135,7 +88,7 @@ def is_deepspeed_megatron_activation_checkpoint_in_traceback():
 
 
 def dummy_pack_hook(tensor):
-    logger.info(
+    logger.debug(
         f"Dummy pack hook for {TensorEqID.from_tensor(tensor)}. Traceback"
         f" {get_oneline_str(*['    ' + line.strip() for line in traceback.format_stack()][:-1])}"
     )
@@ -144,7 +97,7 @@ def dummy_pack_hook(tensor):
         is_torch_activation_checkpoint_in_traceback()
         or is_deepspeed_megatron_activation_checkpoint_in_traceback()
     ):
-        logger.info(
+        logger.debug(
             "Dummy pack hook in checkpoint"
             f" {get_torch_activation_checkpoint_caller_filename_and_line()}"
         )
@@ -152,7 +105,7 @@ def dummy_pack_hook(tensor):
 
 
 def dummy_unpack_hook(tensor):
-    logger.info(
+    logger.debug(
         f"Dummy unpack hook for {TensorEqID.from_tensor(tensor)}. Traceback"
         f" {get_oneline_str(*['    ' + line.strip() for line in traceback.format_stack()][:-1])}"
     )
@@ -193,7 +146,6 @@ class TensorCache:
     module_id_to_module: dict[int, weakref.ref[torch.nn.Module]]
     # Only reentered module is recorded in module_id_to_reenter_count
     module_id_to_reenter_count: dict[int, int]
-    activation_checkpoint_counter: int
     current_activation_context: ActivationContext | None
     activation_checkpoints: list[ActivationContext]
     activation_checkpoint_to_module_id: dict[
@@ -209,6 +161,9 @@ class TensorCache:
     forward_done_modules: list[ModuleReentrantContext | ActivationContext]
     last_module_in_forward: ModuleReentrantContext | ActivationContext | None
     last_module_in_backward: ModuleReentrantContext | ActivationContext | None
+    saved_forward_done_modules: (
+        list[ModuleReentrantContext | ActivationContext] | None
+    )
     backward_done_modules: set[ModuleReentrantContext | ActivationContext]
     backward_done_modules_with_cache_to_clear: set[
         ModuleReentrantContext | ActivationContext
@@ -240,7 +195,7 @@ class TensorCache:
 
     parameters: set[TensorEqID]
 
-    adapter: TorchBuiltinIOAdapter | Any
+    adapter: AdapterBase
 
     current_in_backward: bool
     diable_pack_unpack_hook: bool
@@ -249,10 +204,12 @@ class TensorCache:
         self,
         enable_activation_context_recording=False,
         enable_prefetch=True,
-        adapter: TorchBuiltinIOAdapter | Any = None,
+        adapter: AdapterBase = None,
         implicit_wait_and_set_in_backward: bool = False,
         # Skipping the offloading and reloading of the last module in the forward pass to avoid the issue of the last module being stored and immediately reloaded in the backward pass.
     ):
+        ##
+        ## Options
         self.enable_activation_context_recording = (
             enable_activation_context_recording
         )
@@ -261,46 +218,48 @@ class TensorCache:
             implicit_wait_and_set_in_backward
         )
 
+        ##
+        ## Dynamic / Change with new (micro-)batches
         self.module_id_to_tensor_ids = {}
         self.tensor_id_to_module_ids = {}
-
-        self.module_id_to_module = {}
         self.module_id_to_reenter_count = {}
-        self.activation_checkpoint_counter = 0
         self.current_activation_context = None
         self.activation_checkpoints = []
         self.activation_checkpoint_to_module_id = {}
         self.previous_module_to_activation_context = {}
         self.forward_module_scope_stack = []
         self.forward_done_modules = []
-        self.last_module_in_forward = None
-        self.last_module_in_backward = None
         self.backward_done_modules = set()
         self.backward_done_modules_with_cache_to_clear = set()
         self.delayed_backward_done_modules_with_cache_to_clear = set()
-        self.next_module_to_previous_module = {}
 
         self.tensor_id_to_tensor_to_store = {}
         self.tensor_id_to_filename_and_metadata = {}
         self.filename_finished_use = set()
 
         self.tensor_id_to_loaded_tensor = {}
+        self.current_in_backward = False
+        self.offloading_disabled = False
 
-        self.executor = concurrent.futures.ThreadPoolExecutor()
         self.tensor_being_stored = {}
         self.tensor_being_loaded = {}
 
-        self.lock = threading.Lock()
+        ##
+        ## No changes across (micro-)batches
+        self.module_id_to_module = {}
+        self.saved_forward_done_modules = None
+        self.next_module_to_previous_module = {}
 
+        ##
+        ## Auxiliary
+        self.executor = concurrent.futures.ThreadPoolExecutor()
+        self.lock = threading.Lock()
         self.parameters_and_inputs = set()
 
         if adapter is not None:
             self.adapter = adapter
         else:
             self.adapter = TorchBuiltinIOAdapter()
-
-        self.current_in_backward = False
-        self.offloading_disabled = False
 
     def __del__(self):
         # This function is only triggered when the reference count of the object is zero. In this case, we need to shutdown the executor.
@@ -310,7 +269,7 @@ class TensorCache:
         self.parameters_and_inputs = self.parameters_and_inputs.union(
             {TensorEqID.from_tensor(p) for p in model.parameters()}
         )
-        logger.info(
+        logger.debug(
             "Added parameters to cache"
             f" {get_oneline_str(*{TensorEqID.get_from_tensor(p) for p in model.parameters()})}"
         )
@@ -319,7 +278,7 @@ class TensorCache:
         self.parameters_and_inputs = self.parameters_and_inputs.union(
             {TensorEqID.from_tensor(input) for input in inputs}
         )
-        logger.info(
+        logger.debug(
             "Added inputs or parameters to cache"
             f" {get_oneline_str(', '.join({str(TensorEqID.get_from_tensor(input)) for input in inputs}))}"
         )
@@ -328,7 +287,7 @@ class TensorCache:
         self.parameters_and_inputs = self.parameters_and_inputs.difference(
             {TensorEqID.get_from_tensor(input) for input in inputs}
         )
-        logger.info(
+        logger.debug(
             "Deleted inputs or parameters from cache"
             f" {get_oneline_str(', '.join({str(TensorEqID.get_from_tensor(input)) for input in inputs}))}"
         )
@@ -355,6 +314,7 @@ class TensorCache:
                 self.activation_checkpoint_to_module_id.clear()
                 self.previous_module_to_activation_context.clear()
         else:
+            # Clear modules in the delayed list due to all grad_input being None.
             if (
                 self.current_in_backward
                 and len(self.delayed_backward_done_modules_with_cache_to_clear)
@@ -366,8 +326,8 @@ class TensorCache:
                 self.clear_up_done_backward_modules_cache()
                 self.delayed_backward_done_modules_with_cache_to_clear.clear()
 
-        if self.last_module_in_forward is None:
-            self.last_module_in_forward = self.forward_done_modules[0]
+        if self.saved_forward_done_modules is None:
+            self.saved_forward_done_modules = self.forward_done_modules.copy()
 
         # Clear all the data structures that are only used in the previous backward pass.
         self.forward_done_modules.clear()
@@ -375,7 +335,7 @@ class TensorCache:
 
     def set_in_forward(self):
         """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is a must when activation context recording is enabled."""
-        logger.info("Set current_in_backward flag to False")
+        logger.debug("Set current_in_backward flag to False")
         self.current_in_backward = False
 
     def wait_forward(self):
@@ -386,12 +346,12 @@ class TensorCache:
             self.forward_done_modules[idx + 1]: self.forward_done_modules[idx]
             for idx in range(len(self.forward_done_modules) - 1)
         }
-        if self.last_module_in_forward is None:
-            self.last_module_in_forward = self.forward_done_modules[-1]
+        if self.saved_forward_done_modules is None:
+            self.saved_forward_done_modules = self.forward_done_modules.copy()
 
     def set_in_backward(self):
         """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
-        logger.info("Set current_in_backward flag to True")
+        logger.debug("Set current_in_backward flag to True")
         self.current_in_backward = True
 
     def _update_current_activation_context_in_forward(self):
@@ -408,13 +368,12 @@ class TensorCache:
             ) = get_torch_activation_checkpoint_caller_filename_and_line()
             if self.current_activation_context is None:
                 # We just enter an activation checkpoint region. Update the current_activation_context.
-                logger.info("Entering an activation checkpoint region")
+                logger.debug("Entering an activation checkpoint region")
                 self.current_activation_context = ActivationContext(
-                    sequence_id=self.activation_checkpoint_counter,
+                    sequence_id=len(self.activation_checkpoints),
                     caller_filename=filename,
                     caller_lineno=lineno,
                 )
-                self.activation_checkpoint_counter += 1
             else:
                 # We are already in an activation checkpoint region.
                 if (
@@ -423,15 +382,14 @@ class TensorCache:
                 ):
                     # Update the region because we are entering a new region.
                     self.current_activation_context = ActivationContext(
-                        sequence_id=self.activation_checkpoint_counter,
+                        sequence_id=len(self.activation_checkpoints),
                         caller_filename=filename,
                         caller_lineno=lineno,
                     )
-                    self.activation_checkpoint_counter += 1
                 else:
                     # Do nothing because the region stays the same.
                     return
-            # We incremented the activation_checkpoint_counter. Create entries in data members.
+            # Create entries in data members.
             self.activation_checkpoints.append(self.current_activation_context)
             self.activation_checkpoint_to_module_id[
                 self.current_activation_context
@@ -439,7 +397,7 @@ class TensorCache:
             self.module_id_to_tensor_ids[
                 self.current_activation_context
             ] = set()
-            logger.info(
+            logger.debug(
                 "Adding activation context"
                 f" {self.current_activation_context} into"
                 " forward_module_scope_stack"
@@ -461,7 +419,7 @@ class TensorCache:
                 self.current_activation_context
             )
         else:
-            logger.info("Not in an activation checkpoint region")
+            logger.debug("Not in an activation checkpoint region")
             if not self.current_activation_context is None:
                 # We exit an activation checkpoint region.
                 self.current_activation_context = None
@@ -537,25 +495,30 @@ class TensorCache:
                     backward_pre_module
                 ]
                 if module_to_prefetch in self.module_id_to_tensor_ids:
-                    logger.info(
+                    logger.debug(
                         "Prefetching tensors in backward pre hook"
                         f" {module_to_prefetch}"
                     )
                     self.prefetch_saved_tensors(module_to_prefetch)
 
     def is_last_module_in_forward(self, m: torch.nn.Module) -> bool:
-        if self.last_module_in_forward is None:
+        if self.saved_forward_done_modules is None:
             return False
         return (
             ModuleReentrantContext(
                 module_id=id(m),
                 reenter_count=self.module_id_to_reenter_count.get(id(m), 0),
             )
-            == self.last_module_in_forward
+            == self.saved_forward_done_modules[-1]
         )
 
+    def prefetch_last_module_in_forward_if_not_None(self):
+        # Do the prefetch
+        if not self.saved_forward_done_modules is None:
+            self.prefetch_saved_tensors(self.saved_forward_done_modules[-1])
+
     def is_last_module_in_backward(self, m: torch.nn.Module) -> bool:
-        if self.last_module_in_backward is None:
+        if self.saved_forward_done_modules is None:
             return False
         return (
             ModuleReentrantContext(
@@ -563,7 +526,7 @@ class TensorCache:
                 reenter_count=self.module_id_to_reenter_count.get(id(m), 1)
                 - 1,
             )
-            == self.last_module_in_backward
+            == self.saved_forward_done_modules[0]
         )
 
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
@@ -574,14 +537,14 @@ class TensorCache:
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
                 else:
-                    logger.info(
+                    logger.debug(
                         "Skipping forward pre hook, in the backward"
                         " propagation to avoid issue in activation"
                         f" recomputation, of {get_oneline_str(m)}({id(m)})"
                     )
                     return
 
-            logger.info(
+            logger.debug(
                 f"Forward pre hook for {get_oneline_str(m)}, is Linear:"
                 f" {'Linear' in str(m)}. Current activation context"
                 f" {self.current_activation_context}."
@@ -591,7 +554,7 @@ class TensorCache:
                 # The runtime is to do the forward logic within module m.
                 self.module_id_to_module[id(m)] = weakref.ref(m)
             else:
-                logger.warning(
+                logger.info(
                     f"Module {get_oneline_str(m)}({id(m)}) already exists in"
                     " self.module_id_to_module"
                 )
@@ -634,7 +597,7 @@ class TensorCache:
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
-                    logger.info(
+                    logger.debug(
                         "Skipping forward hook, in the backward propagation to"
                         " avoid issue in activation recomputation, for"
                         f" {get_oneline_str(m)}({id(m)})"
@@ -644,7 +607,7 @@ class TensorCache:
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
 
-            logger.info(f"Forward hook for {get_oneline_str(m)}({id(m)})")
+            logger.debug(f"Forward hook for {get_oneline_str(m)}({id(m)})")
             # The runtime has finished the forward logic within module m.
             assert not isinstance(
                 self.forward_module_scope_stack[-1], ActivationContext
@@ -659,7 +622,7 @@ class TensorCache:
 
     def get_full_backward_pre_hook(self) -> Callable[..., None]:
         def full_backward_pre_hook(m, grad_output) -> None:
-            logger.info(
+            logger.debug(
                 f"Full backward pre hook for ({id(m)}) {get_oneline_str(m)}"
             )
             if self.enable_activation_context_recording:
@@ -712,7 +675,7 @@ class TensorCache:
                     )
                 return
 
-            logger.info(
+            logger.debug(
                 f"Full backward hook for ({id(m)}) {get_oneline_str(m)},"
                 f" {get_oneline_str(grad_input)},"
                 f" {get_oneline_str(grad_output)}"
@@ -738,14 +701,14 @@ class TensorCache:
 
             if tensor.device.type == "cpu":
                 # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
-                logger.info(
+                logger.debug(
                     f"Tensor cache skips packing CPU tensor {tensor_id}"
                 )
                 return tensor
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
-                    logger.info(
+                    logger.debug(
                         "Tensor cache skips packing in backward propagation"
                         f" {tensor_id}"
                     )
@@ -758,15 +721,15 @@ class TensorCache:
             with self.lock:
                 # Skip parameters because they will stay in memory always.
                 if tensor_id in self.parameters_and_inputs:
-                    logger.info(f"Tensor cache skips packing {tensor_id}")
+                    logger.debug(f"Tensor cache skips packing {tensor_id}")
                     return tensor
-                logger.info(f"Packing {tensor_id}, {tensor.shape}")
+                logger.debug(f"Packing {tensor_id}, {tensor.shape}")
 
                 if self.offloading_disabled:
                     pass  # No need to store. Continue to the next step to register it into the other data structures.
                 else:
                     if tensor_id not in self.tensor_id_to_tensor_to_store:
-                        logger.info(
+                        logger.debug(
                             f"Adding tensor {tensor_id} into tensor to store"
                         )
                         self.tensor_id_to_filename_and_metadata[tensor_id] = (
@@ -792,7 +755,7 @@ class TensorCache:
                             tensor_id
                         ] = weakref.ref(tensor)
                     else:
-                        logger.info(
+                        logger.debug(
                             f"Tensor {tensor_id} already exists in tensor to"
                             " store"
                         )
@@ -801,7 +764,7 @@ class TensorCache:
                 self.tensor_id_to_module_ids[tensor_id].add(
                     self.forward_module_scope_stack[-1]
                 )
-                logger.info(
+                logger.debug(
                     f"Recording tensor {tensor_id} in module"
                     f" {self.forward_module_scope_stack[-1]}"
                 )
@@ -830,14 +793,14 @@ class TensorCache:
                     TensorEqID.get_from_tensor(tensor_id_or_tensor)
                     in self.parameters_and_inputs
                 ):
-                    logger.info(
+                    logger.debug(
                         "Tensor cache skips unpacking, due to parameters and"
                         " inputs,"
                         f" {TensorEqID.get_from_tensor(tensor_id_or_tensor)},"
                         f" {tensor_id_or_tensor.shape}"
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "Tensor cache skips unpacking, due to activation"
                         " recomputing,"
                         f" {TensorEqID.from_tensor(tensor_id_or_tensor, self.lock)},"
@@ -867,7 +830,7 @@ class TensorCache:
                             tensor_id_or_tensor
                         ] = result_tensor
 
-                logger.info(
+                logger.debug(
                     f"Unpacking {tensor_id_or_tensor},"
                     f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
                 )
@@ -972,7 +935,7 @@ class TensorCache:
         with self.lock:
             for module_id in self.backward_done_modules_with_cache_to_clear:
                 for tensor_id in self.module_id_to_tensor_ids[module_id]:
-                    logger.info(
+                    logger.debug(
                         f"Removing tensor from tensor cache {tensor_id} for"
                         f" module {module_id}. Modules to clear"
                         f" {self.backward_done_modules_with_cache_to_clear}"
@@ -1020,8 +983,6 @@ class TensorCache:
                             ][0:4]
                         )
                 del self.module_id_to_tensor_ids[module_id]
-                if isinstance(module_id, int):
-                    del self.module_id_to_module[module_id]
             self.backward_done_modules_with_cache_to_clear.clear()
 
     # def remove_done_from_storing_queue(self):

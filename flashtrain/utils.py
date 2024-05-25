@@ -1,8 +1,7 @@
 import torch
 from typing import Callable, TypeVar
 from .tensor_cache import tensor_cache as TC
-from .tensor_cache.utils import get_oneline_str
-from .logger import logger
+from .logger import logger, get_oneline_str
 
 
 # Adapted from _register_hooks_recursively at https://github.com/microsoft/DeepSpeed/blob/0fc19b6a320cf8aa0a5f6c2b1fa310bae9a70d94/deepspeed/runtime/zero/parameter_offload.py

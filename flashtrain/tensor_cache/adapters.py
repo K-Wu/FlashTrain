@@ -1,8 +1,8 @@
 import kvikio
 import cupy
 import torch
-from ..logger import logger
-from .utils import TensorEqID, get_oneline_str
+from ..logger import logger, get_oneline_str
+from .utils import TensorEqID
 import concurrent.futures
 import threading
 from typing import Any
@@ -13,7 +13,7 @@ from abc import ABCMeta, abstractmethod
 def create_new_filename(
     identifier: str,  # Used to distinguish tensors among distributed processes.
     tensor: torch.Tensor,
-    path: str = "/tmp",
+    path: str,
 ) -> str:
     """
     Create a filename for a new file when storing tensor on the device.
@@ -23,9 +23,7 @@ def create_new_filename(
     # Use TensorEqID instead of id(tensor) because id(tensor) collision may happen when the data pointers of the two different tensors are the same.
     return os.path.join(
         path,
-        (
-            f"{identifier}_{TensorEqID.from_tensor(tensor)}_{str(tensor.device).replace(':', '_')}.pt"
-        ),
+        f"{identifier}_{TensorEqID.from_tensor(tensor)}.pt",
     )
 
 
@@ -57,7 +55,7 @@ class AdapterBase(metaclass=ABCMeta):
         thread_lock: threading.Lock,
     ):
         self.save_tensor(tensor, path)
-        logger.info(
+        logger.debug(
             f"Async wrapper saved tensor {TensorEqID.from_tensor(tensor)}"
         )
         with thread_lock:
@@ -95,7 +93,7 @@ class AdapterBase(metaclass=ABCMeta):
             if tensor_id in tensor_id_to_loaded_tensor:
                 del tensor_being_loaded[tensor_id]
                 return
-        logger.info(f"Async wrapper loading tensor from path {path}")
+        logger.debug(f"Async wrapper loading tensor from path {path}")
         loaded = self.load_tensor(path, shape, dtype, device)
         with thread_lock:
             tensor_id_to_loaded_tensor[tensor_id] = loaded
@@ -110,6 +108,53 @@ class AdapterBase(metaclass=ABCMeta):
         device: torch.device,
     ):
         pass
+
+
+class TorchBuiltinIOAdapter(AdapterBase):
+    path: str
+
+    def __init__(self, path: str = "/tmp"):
+        self.path = path
+
+    def create_new_filename(
+        self,
+        identifier: str,  # Used to distinguish tensors among distributed processes.
+        tensor: torch.Tensor,
+    ):
+        """
+        Create a filename for a new file when storing tensor on the device.
+        """
+        return create_new_filename(identifier, tensor, self.path)
+
+    def save_tensor(self, tensor: torch.Tensor, path: str):
+        """
+        Save the tensor to the file.
+        """
+        torch.save(tensor, path)
+        logger.debug(
+            "Saved tensor"
+            f" {get_oneline_str(tensor)} ({TensorEqID.get_from_tensor(tensor)})"
+            f" to {path}"
+        )
+
+    def load_tensor(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        """
+        Load the tensor from the file.
+        """
+        # We rely on torch.load to determine the device of the tensor as the device it was originally on when saved was serialized into the file as well.
+        tensor = torch.load(path)
+        logger.debug(
+            f"Loading tensor {get_oneline_str(tensor)} from path {path}"
+        )
+        return tensor
+
+    # TODO: implement clean_up_when_end to delete files
 
 
 class KvikioIOAdapter(AdapterBase):
@@ -137,7 +182,7 @@ class KvikioIOAdapter(AdapterBase):
         tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
         with kvikio.CuFile(path, "w") as f:
             f.write(tensor_cupy)
-        logger.info(
+        logger.debug(
             "Kvikio Saved tensor"
             f" {get_oneline_str(tensor_cupy, True)} ({TensorEqID.from_tensor(tensor)})"
         )
@@ -156,7 +201,7 @@ class KvikioIOAdapter(AdapterBase):
         # tensor_cupy = cupy.asarray(tensor)
         with kvikio.CuFile(path, "r") as f:
             f.read(tensor)
-        logger.info(
+        logger.debug(
             f"Kvikio Loading tensor {get_oneline_str(tensor, True)} from path"
             f" {path}"
         )
@@ -190,7 +235,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         self.cpu_tensor_cache[
             (path, tensor.shape, tensor.dtype, tensor.device)
         ] = tensor.cpu()
-        logger.info(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
+        logger.debug(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
 
     def load_tensor(
         self,
@@ -203,7 +248,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         Load the tensor from the file.
         """
         tensor = self.cpu_tensor_cache[(path, shape, dtype, device)].to(device)
-        logger.info(f"Kvikio Loading tensor from path {path}")
+        logger.debug(f"Kvikio Loading tensor from path {path}")
         return tensor
 
     # TODO: implement clean_up_when_end which does nothing

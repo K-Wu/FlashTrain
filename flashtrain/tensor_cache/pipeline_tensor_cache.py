@@ -134,6 +134,16 @@ class PipelineTensorCache:
                 self.tensor_caches[
                     self.current_microbatch_idx
                 ].offloading_disabled = True
+
+            # Prefetch the saved tensors for the first module in the next microbatch if this is the last module of this microbatch
+            if self.next_stage == Stage.BACKWARD and self.tensor_caches[
+                self.current_microbatch_idx
+            ].is_last_module_in_forward(m):
+                assert self.next_microbatch_idx is not None
+                self.tensor_caches[
+                    self.next_microbatch_idx
+                ].prefetch_last_module_in_forward_if_not_None()
+
             self.tensor_caches_forward_pre_hook[self.current_microbatch_idx](
                 m, inputs
             )
@@ -162,24 +172,14 @@ class PipelineTensorCache:
 
     def get_full_backward_pre_hook(self) -> Callable[..., None]:
         def full_backward_pre_hook(m, grad_output) -> None:
-            # Prefetch the saved tensors for the first module in the next microbatch if this is the last microbatch
-            if self.next_stage == Stage.FORWARD and self.tensor_caches[
+            # Prefetch the saved tensors for the first module in the next microbatch if this is the last module of this microbatch
+            if self.next_stage == Stage.BACKWARD and self.tensor_caches[
                 self.current_microbatch_idx
             ].is_last_module_in_backward(m):
                 assert self.next_microbatch_idx is not None
-                if (
-                    not self.tensor_caches[
-                        self.next_microbatch_idx
-                    ].last_module_in_forward
-                    is None
-                ):
-                    self.tensor_caches[
-                        self.next_microbatch_idx
-                    ].prefetch_saved_tensors(
-                        self.tensor_caches[
-                            self.next_microbatch_idx
-                        ].last_module_in_forward
-                    )
+                self.tensor_caches[
+                    self.next_microbatch_idx
+                ].prefetch_last_module_in_forward_if_not_None()
             self.tensor_caches_full_backward_pre_hook[
                 self.current_microbatch_idx
             ](m, grad_output)

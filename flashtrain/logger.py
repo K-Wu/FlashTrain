@@ -53,3 +53,12 @@ logger.addHandler(stdout_handler)
 def get_current_level():
     """Return logger's current log level."""
     return logger.getEffectiveLevel()
+
+
+def get_oneline_str(*args, verbose_only: bool = False) -> str:
+    # If level higher than DEBUG
+    if (not verbose_only) or logger.level <= logging.NOTSET:
+        reprs = [str(arg).replace("\n", "↵") for arg in args]
+    else:
+        reprs = [""]
+    return " ".join(reprs)
