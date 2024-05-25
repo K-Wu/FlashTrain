@@ -5,7 +5,7 @@ from .tensor_cache import (
     ActivationContext,
 )
 from .utils import TensorEqID
-from typing import Callable, Any
+from typing import Callable, Any, Optional
 from enum import Enum
 
 
@@ -25,6 +25,11 @@ class PipelineTensorCache:
     tensor_caches_pack_hook: list[Callable[[torch.Tensor], Any]]
     tensor_caches_unpack_hook: list[Callable[[Any], torch.Tensor]]
     current_microbatch_idx: int
+    current_stage: Stage
+
+    # The following are set if the next stage is a pipeline stage (i.e., not communication)
+    next_microbatch_idx: int | None
+    next_stage: Stage | None
 
     def __init__(self, num_microbatches: int, *args, **kwargs):
         # The __init__ method uses num_microbatches to determine the number of tensor caches to create. And it pass all the arguments and keyword arguments to the TensorCache class.
@@ -56,6 +61,9 @@ class PipelineTensorCache:
         ]
 
         self.current_microbatch_idx = 0
+        self.current_stage = Stage.FORWARD
+        self.next_microbatch_idx = None
+        self.next_stage = None
 
     def __del__(self):
         for idx in reversed(range(len(self.tensor_caches))):
@@ -89,23 +97,43 @@ class PipelineTensorCache:
             self.current_microbatch_idx
         ].del_inputs_or_parameters(*inputs)
 
-    def set_in_forward_for_all(self):
-        for tensor_cache in self.tensor_caches:
-            tensor_cache.set_in_forward()
-
-    def set_in_backward_for_all(self):
-        for tensor_cache in self.tensor_caches:
-            tensor_cache.set_in_backward()
-
-    def set_stage(self, idx_microbatch: int, stage: Stage):
+    def set_stage(
+        self,
+        idx_microbatch: int,
+        stage: Stage,
+        next_idx_microbatch: Optional[int] = None,
+        next_stage: Optional[Stage] = None,
+    ):
         self.current_microbatch_idx = idx_microbatch
+        self.current_stage = stage
         if stage == Stage.FORWARD:
             self.tensor_caches[idx_microbatch].set_in_forward()
         elif stage == Stage.BACKWARD:
             self.tensor_caches[idx_microbatch].set_in_backward()
 
+        self.next_microbatch_idx = next_idx_microbatch
+        self.next_stage = next_stage
+
+    def wait_current_stage(self):
+        if self.current_stage == Stage.FORWARD:
+            self.tensor_caches[self.current_microbatch_idx].wait_forward()
+        else:
+            assert self.current_stage == Stage.BACKWARD
+            self.tensor_caches[self.current_microbatch_idx].wait_backward()
+
     def get_forward_pre_hook(self) -> Callable[..., None]:
         def forward_pre_hook(m, inputs) -> None:
+            # Disable pack/unpack hooks if this module is to be immediately backward propagated
+            if (
+                self.tensor_caches[
+                    self.current_microbatch_idx
+                ].is_last_module_in_forward(m)
+                and self.next_stage == Stage.BACKWARD
+                and self.next_microbatch_idx == self.current_microbatch_idx
+            ):
+                self.tensor_caches[
+                    self.current_microbatch_idx
+                ].offloading_disabled = True
             self.tensor_caches_forward_pre_hook[self.current_microbatch_idx](
                 m, inputs
             )
@@ -114,6 +142,18 @@ class PipelineTensorCache:
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, inputs, outputs) -> None:
+            # Reenable pack/unpack hooks if this module is to be immediately backward propagated
+            if (
+                self.tensor_caches[
+                    self.current_microbatch_idx
+                ].is_last_module_in_forward(m)
+                and self.next_stage == Stage.BACKWARD
+                and self.next_microbatch_idx == self.current_microbatch_idx
+            ):
+                self.tensor_caches[
+                    self.current_microbatch_idx
+                ].offloading_disabled = False
+
             self.tensor_caches_forward_hook[self.current_microbatch_idx](
                 m, inputs, outputs
             )
@@ -122,6 +162,24 @@ class PipelineTensorCache:
 
     def get_full_backward_pre_hook(self) -> Callable[..., None]:
         def full_backward_pre_hook(m, grad_output) -> None:
+            # Prefetch the saved tensors for the first module in the next microbatch if this is the last microbatch
+            if self.next_stage == Stage.FORWARD and self.tensor_caches[
+                self.current_microbatch_idx
+            ].is_last_module_in_backward(m):
+                assert self.next_microbatch_idx is not None
+                if (
+                    not self.tensor_caches[
+                        self.next_microbatch_idx
+                    ].last_module_in_forward
+                    is None
+                ):
+                    self.tensor_caches[
+                        self.next_microbatch_idx
+                    ].prefetch_saved_tensors(
+                        self.tensor_caches[
+                            self.next_microbatch_idx
+                        ].last_module_in_forward
+                    )
             self.tensor_caches_full_backward_pre_hook[
                 self.current_microbatch_idx
             ](m, grad_output)

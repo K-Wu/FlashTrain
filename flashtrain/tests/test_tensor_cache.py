@@ -54,6 +54,7 @@ class SimpleModelTestWithCache(TestCase):
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
     @parametrize("use_checkpoint", [True, False])
+    @parametrize("enable_microbatch", [True, False])
     @parametrize(
         "adapter_type", ["native", "main_memory", "kvikio", "revolver"]
     )
@@ -62,7 +63,7 @@ class SimpleModelTestWithCache(TestCase):
         use_recursive_do=True,
         debug_viz=False,
         use_checkpoint=True,
-        enable_microbatch=True,
+        enable_microbatch=False,
         adapter_type="kvikio",
     ) -> None:
         torch.manual_seed(0)
@@ -171,7 +172,12 @@ class SimpleModelTestWithCache(TestCase):
                 tensor_cache.set_in_forward()
             else:
                 assert isinstance(tensor_cache, PTC.PipelineTensorCache)
-                tensor_cache.set_stage(0, Stage.FORWARD)
+                tensor_cache.set_stage(
+                    0,
+                    Stage.FORWARD,
+                    next_idx_microbatch=0,
+                    next_stage=Stage.BACKWARD,
+                )
             torch.manual_seed(i)
             input = torch.rand(4, 5).cuda()
             input_withcache = input.clone().detach()
@@ -221,15 +227,28 @@ class SimpleModelTestWithCache(TestCase):
                 loss_withcache = output_withcache.sum()
                 if not enable_microbatch:
                     assert isinstance(tensor_cache, TC.TensorCache)
+                    tensor_cache.wait_forward()
                     tensor_cache.set_in_backward()
                 else:
                     assert isinstance(tensor_cache, PTC.PipelineTensorCache)
-                    tensor_cache.set_stage(0, Stage.BACKWARD)
+                    tensor_cache.wait_current_stage()
+                    tensor_cache.set_stage(
+                        0,
+                        Stage.BACKWARD,
+                        next_idx_microbatch=1,
+                        next_stage=Stage.FORWARD,
+                    )
                 loss_withcache.backward()
                 if enable_microbatch:
                     # Do another batch and then accumulate the gradients.
                     assert isinstance(tensor_cache, PTC.PipelineTensorCache)
-                    tensor_cache.set_stage(1, Stage.FORWARD)
+                    tensor_cache.wait_current_stage()
+                    tensor_cache.set_stage(
+                        1,
+                        Stage.FORWARD,
+                        next_idx_microbatch=1,
+                        next_stage=Stage.BACKWARD,
+                    )
                     input = torch.rand(4, 5).cuda()
                     if use_checkpoint and i % 2 == 0:
                         # Test accumulation of pass with checkpointing and without.
@@ -239,9 +258,17 @@ class SimpleModelTestWithCache(TestCase):
                     else:
                         output_withcache = model_withcache(input)
                     loss_withcache = output_withcache.sum()
-                    tensor_cache.set_stage(1, Stage.BACKWARD)
+                    tensor_cache.wait_current_stage()
+                    tensor_cache.set_stage(
+                        1,
+                        Stage.BACKWARD,
+                        next_idx_microbatch=0,
+                        next_stage=Stage.FORWARD,
+                    )
                     loss_withcache.backward()
-
+                    tensor_cache.wait_current_stage()
+                else:
+                    tensor_cache.wait_backward()
             optim_withcache.step()
             if not enable_microbatch:
                 self.assertEqual(output, output_withcache)
