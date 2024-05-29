@@ -47,6 +47,11 @@ def get_torch_activation_checkpoint_caller_filename_and_line() -> (
     for idx in reversed(range(len(trace_stack))):
         if os.path.join("torch", "utils", "checkpoint.py") in trace_stack[idx]:
             found_entry_in_checkpoint_py = True
+        elif (
+            os.path.join("megatron", "core", "tensor_parallel", "random.py")
+            in trace_stack[idx]
+        ):
+            found_entry_in_checkpoint_py = True
         else:
             if found_entry_in_checkpoint_py:
                 found_and_current_outside_checkpoint_py = True
