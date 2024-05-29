@@ -8,8 +8,13 @@
 ### Installing apex
 Follow the instruction [here](https://github.com/NVIDIA/apex?tab=readme-ov-file#linux) to install from source. Do not install apex via pip directly because the megatron code dependent on apex won't work in this case.
 
-## Installing Megatron-DeepSpeed
+### Installing Megatron-DeepSpeed
 Go to third_party/Megatron-DeepSpeed and follow the instruction to install Megatron-DeepSpeed from source.
+
+#### Installing Transformer-Engine
+```
+pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+```
 
 ### Installing Kvikio
 Check [Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
