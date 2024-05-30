@@ -731,7 +731,8 @@ class TensorCache:
                 logger.debug(f"Packing {tensor_id}, {tensor.shape}")
 
                 if self.offloading_disabled:
-                    pass  # No need to store. Continue to the next step to register it into the other data structures.
+                    # No need to store. Continue to the next step to register it into the other data structures.
+                    self.tensor_id_to_loaded_tensor[tensor_id] = tensor
                 else:
                     if tensor_id not in self.tensor_id_to_tensor_to_store:
                         logger.debug(
@@ -843,19 +844,13 @@ class TensorCache:
 
         return unpack_hook
 
-    def get_saved_tensors(self, module: torch.nn.Module) -> None:
+    def get_saved_tensors(
+        self, module_id: ModuleReentrantContext | ActivationContext
+    ) -> None:
         """
         Get the saved tensors for backward in the forward pass.
         """
-        tensor_ids = self.module_id_to_tensor_ids[
-            ModuleReentrantContext(
-                module_id=id(module),
-                reenter_count=self.module_id_to_reenter_count.get(
-                    id(module), 1
-                )
-                - 1,
-            )
-        ]
+        tensor_ids = self.module_id_to_tensor_ids[module_id]
         for tensor_id in tensor_ids:
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -967,11 +962,21 @@ class TensorCache:
                             tensor_id,
                             None,
                         )
-                        self.filename_finished_use.add(
-                            self.tensor_id_to_filename_and_metadata[tensor_id][
-                                0
-                            ]
-                        )
+                        if (
+                            tensor_id
+                            in self.tensor_id_to_filename_and_metadata
+                        ):
+                            # This clause is skipped in the last module in the forward pass due to offloading_disabled.
+                            self.filename_finished_use.add(
+                                self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][0]
+                            )
+                            self.adapter.clean_up_in_backward(
+                                *self.tensor_id_to_filename_and_metadata[
+                                    tensor_id
+                                ][0:4]
+                            )
                         del_dict_key_if_exists(
                             self.tensor_id_to_loaded_tensor,
                             tensor_id,
@@ -981,11 +986,6 @@ class TensorCache:
                             self.tensor_being_stored,
                             tensor_id,
                             None,
-                        )
-                        self.adapter.clean_up_in_backward(
-                            *self.tensor_id_to_filename_and_metadata[
-                                tensor_id
-                            ][0:4]
                         )
                 del self.module_id_to_tensor_ids[module_id]
             self.backward_done_modules_with_cache_to_clear.clear()

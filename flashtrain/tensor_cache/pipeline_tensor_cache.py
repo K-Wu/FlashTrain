@@ -136,7 +136,7 @@ class PipelineTensorCache:
                 ].offloading_disabled = True
 
             # Prefetch the saved tensors for the first module in the next microbatch if this is the last module of this microbatch
-            if self.next_stage == Stage.BACKWARD and self.tensor_caches[
+            elif self.next_stage == Stage.BACKWARD and self.tensor_caches[
                 self.current_microbatch_idx
             ].is_last_module_in_forward(m):
                 assert self.next_microbatch_idx is not None
@@ -214,10 +214,12 @@ class PipelineTensorCache:
 
         return unpack_hook
 
-    def get_saved_tensors(self, module: torch.nn.Module) -> None:
+    def get_saved_tensors(
+        self, module_id: ModuleReentrantContext | ActivationContext
+    ) -> None:
         # Do it for the current microbatch's tensor cache
         self.tensor_caches[self.current_microbatch_idx].get_saved_tensors(
-            module
+            module_id
         )
 
     def prefetch_saved_tensors(
