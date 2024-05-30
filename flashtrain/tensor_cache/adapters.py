@@ -235,7 +235,10 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         self.cpu_tensor_cache[
             (path, tensor.shape, tensor.dtype, tensor.device)
         ] = tensor.cpu()
-        logger.debug(f"Kvikio Saved tensor {TensorEqID.from_tensor(tensor)}")
+        logger.debug(
+            f"Main Memory Saved tensor {TensorEqID.from_tensor(tensor)} to"
+            f" {(path, tensor.shape, tensor.dtype, tensor.device)}"
+        )
 
     def load_tensor(
         self,
@@ -248,7 +251,10 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         Load the tensor from the file.
         """
         tensor = self.cpu_tensor_cache[(path, shape, dtype, device)].to(device)
-        logger.debug(f"Kvikio Loading tensor from path {path}")
+        logger.debug(
+            f"Main Memory Loading tensor {(path, shape, dtype, device)} from"
+            f" path {path}"
+        )
         return tensor
 
     # TODO: implement clean_up_when_end which does nothing

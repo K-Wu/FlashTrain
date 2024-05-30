@@ -219,17 +219,13 @@ class SimpleModelTestWithCache(TestCase):
                 if use_checkpoint:
                     # Adapted from https://github.com/prigoyal/pytorch_memonger/blob/master/tutorial/Checkpointing_for_PyTorch_models.ipynb
                     output_withcache = checkpoint.checkpoint(
-                        model_withcache, input, use_reentrant=False
+                        model_withcache, input, use_reentrant=True
                     )
                 else:
                     output_withcache = model_withcache(input_withcache)
 
                 loss_withcache = output_withcache.sum()
-                if not enable_microbatch:
-                    assert isinstance(tensor_cache, TC.TensorCache)
-                    tensor_cache.wait_forward()
-                    tensor_cache.set_in_backward()
-                else:
+                if enable_microbatch:
                     assert isinstance(tensor_cache, PTC.PipelineTensorCache)
                     tensor_cache.wait_current_stage()
                     tensor_cache.set_stage(
@@ -238,6 +234,11 @@ class SimpleModelTestWithCache(TestCase):
                         next_idx_microbatch=1,
                         next_stage=Stage.FORWARD,
                     )
+                else:
+                    assert isinstance(tensor_cache, TC.TensorCache)
+                    tensor_cache.wait_forward()
+                    tensor_cache.set_in_backward()
+
                 loss_withcache.backward()
                 if enable_microbatch:
                     # Do another batch and then accumulate the gradients.
@@ -292,5 +293,5 @@ class SimpleModelTestWithCache(TestCase):
 
 instantiate_parametrized_tests(SimpleModelTestWithCache)
 if __name__ == "__main__":
-    logger.setLevel(logging.getLevelName("INFO"))
+    logger.setLevel(logging.getLevelName("DEBUG"))
     run_tests()

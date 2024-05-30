@@ -353,6 +353,7 @@ class TensorCache:
         }
         if self.saved_forward_done_modules is None:
             self.saved_forward_done_modules = self.forward_done_modules.copy()
+        self.wait_for_storing_queue()
 
     def set_in_backward(self):
         """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
