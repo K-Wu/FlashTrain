@@ -1,8 +1,6 @@
 import socket
 from ...logger import logger
 from ..adapters import (
-    AdapterBase,
-    TorchBuiltinIOAdapter,
     KvikioIOAdapter,
     TorchMainMemoryIOAdapter,
     RevolverIOAdapter,
@@ -16,14 +14,40 @@ HOSTNAMES_TO_CONFIGS = {
     "bafs-01": {
         "adapter": [
             [
-                (KvikioIOAdapter, {"path": "/scratch/impact/cache"}),
-                (KvikioIOAdapter, {"path": "/scratch/impact/cache"}),
-                (KvikioIOAdapter, {"path": "/scratch/impact/cache"}),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter0"},
+                ),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter1"},
+                ),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter2"},
+                ),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/nvme14/kunwu2/FlashTrain_temp"},
+                ),
             ],  # Rank 0
             [
-                (KvikioIOAdapter, {"path": "/scratch/impact/cache"}),
-                (KvikioIOAdapter, {"path": "/scratch/impact/cache"}),
-                (KvikioIOAdapter, {"path": "/scratch/impact/cache"}),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/md1/kunwu2/FlashTrain_temp/adapter0"},
+                ),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/md1/kunwu2/FlashTrain_temp/adapter1"},
+                ),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/nvme7/kunwu2/FlashTrain_temp"},
+                ),
+                (
+                    KvikioIOAdapter,
+                    {"path": "/mnt/nvme17/kunwu2/FlashTrain_temp"},
+                ),
             ],  # Rank 1
         ],
     },
