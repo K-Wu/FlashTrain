@@ -23,7 +23,7 @@ from megatron.core.utils import safely_set_viewless_tensor_data
 import deepspeed
 
 
-class CheckpointFunction(torch.autograd.Function):
+class ReevaluatorFunction(torch.autograd.Function):
     """This function is adapted from torch.utils.checkpoint with
     two main changes:
         1) torch.cuda.set_rng_state is replaced with `_set_cuda_rng_state`
@@ -129,12 +129,12 @@ class CheckpointFunction(torch.autograd.Function):
         return (None, None) + grads
 
 
-def checkpoint(function, distribute_saved_activations, *args):
+def reevaluator(function, distribute_saved_activations, *args):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
     if deepspeed.checkpointing.is_configured():
-        return deepspeed_reevaluator.checkpoint(function, *args)
+        return deepspeed_reevaluator.reevaluator(function, *args)
 
-    return CheckpointFunction.apply(
+    return ReevaluatorFunction.apply(
         function, distribute_saved_activations, *args
     )

@@ -33,7 +33,7 @@ from deepspeed.runtime.activation_checkpointing.checkpointing import (
 import deepspeed.runtime.activation_checkpointing.checkpointing as checkpointing
 
 
-class CheckpointFunction(torch.autograd.Function):
+class ReevaluatorFunction(torch.autograd.Function):
     """This function is adapted from torch.utils.checkpoint with
     two main changes:
         1) torch.cuda.set_rng_state is replaced with `_set_cuda_rng_state`  #ignore-cuda
@@ -343,12 +343,12 @@ class CheckpointFunction(torch.autograd.Function):
         return tuple(ret_list)
 
 
-def checkpoint(function, *args):
+def reevaluator(function, *args):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
 
     all_outputs = []
-    CheckpointFunction.apply(function, all_outputs, *args)
+    ReevaluatorFunction.apply(function, all_outputs, *args)
     if len(all_outputs) == 1:
         return all_outputs[0]
     else:
