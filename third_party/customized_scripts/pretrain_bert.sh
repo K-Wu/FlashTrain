@@ -42,7 +42,9 @@ OUTPUT_ARGS="
     --eval-iters 10
 "
 
-torchrun pretrain_bert.py \
+SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
+
+torchrun  "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_bert.py \
     $BERT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \

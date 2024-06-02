@@ -150,8 +150,10 @@ fi
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
+SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
+
 torchrun $DISTRIBUTED_ARGS \
-       pretrain_gpt.py \
+       "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
        --enable-tensor-cache \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \

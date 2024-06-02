@@ -37,9 +37,12 @@ ZERO_STAGE=0
 # INIT_STD=0.02
 
 ## BERT 336M (same config as original BERT-Large model)
-NUM_LAYERS=24
-HIDDEN_SIZE=1024
-NUM_ATTN_HEADS=16
+#NUM_LAYERS=24
+NUM_LAYERS=2
+# HIDDEN_SIZE=1024
+HIDDEN_SIZE=5120
+#NUM_ATTN_HEADS=16
+NUM_ATTN_HEADS=80
 INIT_STD=0.02
 
 ## BERT 1.3B
@@ -100,6 +103,10 @@ DISTRIBUTED_ARGS="
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT
 "
+ 
+#    --checkpoint-num-layers 1 \
+#    --recompute-granularity full \
+#    --recompute-method uniform \
 
 BERT_ARGS="
     --enable-tensor-cache \
@@ -151,7 +158,9 @@ OUTPUT_ARGS="
     --eval-iters 10
 "
 
-torchrun $DISTRIBUTED_ARGS pretrain_bert.py \
+SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
+
+torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_bert.py \
     $BERT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
