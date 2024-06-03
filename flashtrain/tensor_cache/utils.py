@@ -53,12 +53,15 @@ class TensorEqID:  # (dataobject):
                         data_ptr = tensor.timestamp
             else:
                 data_ptr = id(tensor.data)
-
+        if isinstance(tensor.stride, int):
+            stride = (tensor.stride,)
+        else:
+            stride = tensor.stride()
         return cls(
             data_ptr=data_ptr,
             dtype=tensor.dtype,
             shape=tuple(tensor.shape),
-            stride=tensor.stride(),
+            stride=stride,
             device=tensor.device,
         )
 
