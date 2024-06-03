@@ -133,7 +133,7 @@ class TorchBuiltinIOAdapter(AdapterBase):
         torch.save(tensor, path)
         logger.debug(
             "Saved tensor"
-            f" {get_oneline_str(tensor)} ({TensorEqID.get_from_tensor(tensor)})"
+            f" {get_oneline_str(tensor, True)} ({TensorEqID.get_from_tensor(tensor)})"
             f" to {path}"
         )
 
@@ -150,7 +150,7 @@ class TorchBuiltinIOAdapter(AdapterBase):
         # We rely on torch.load to determine the device of the tensor as the device it was originally on when saved was serialized into the file as well.
         tensor = torch.load(path)
         logger.debug(
-            f"Loading tensor {get_oneline_str(tensor)} from path {path}"
+            f"Loading tensor {get_oneline_str(tensor), True} from path {path}"
         )
         return tensor
 
@@ -159,9 +159,18 @@ class TorchBuiltinIOAdapter(AdapterBase):
 
 class KvikioIOAdapter(AdapterBase):
     path: str
+    streams: list[torch.cuda.Stream]
+    current_stream_idx: int
+    lock: threading.Lock
 
-    def __init__(self, path: str = "/tmp"):
+    def __init__(self, path: str = "/tmp", num_streams: int = 2):
         self.path = path
+        self.streams = []
+        for _ in range(num_streams):
+            self.streams.append(torch.cuda.Stream())
+        self.current_stream_idx = 0
+
+        self.lock = threading.Lock()
 
     def create_new_filename(
         self,
@@ -180,8 +189,20 @@ class KvikioIOAdapter(AdapterBase):
         # tensor_cupy = cupy.asarray(tensor)
         # Issue at https://github.com/cupy/cupy/issues/7144
         tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
+
+        with self.lock:
+            store_stream = self.streams[self.current_stream_idx]
+            self.current_stream_idx = (self.current_stream_idx + 1) % len(
+                self.streams
+            )
+
         with kvikio.CuFile(path, "w") as f:
-            f.write(tensor_cupy)
+            event = torch.cuda.Event()
+            event.record(stream=torch.cuda.current_stream())
+            store_stream.wait_event(event)
+            future = f.raw_write_async(tensor_cupy, store_stream.cuda_stream)
+            # f.write(tensor_cupy)
+            future.check_bytes_done()
         logger.debug(
             "Kvikio Saved tensor"
             f" {get_oneline_str(tensor_cupy, True)} ({TensorEqID.from_tensor(tensor)})"
@@ -199,8 +220,20 @@ class KvikioIOAdapter(AdapterBase):
         """
         tensor = torch.empty(shape, dtype=dtype, device=device)
         # tensor_cupy = cupy.asarray(tensor)
+
+        with self.lock:
+            load_stream = self.streams[self.current_stream_idx]
+            self.current_stream_idx = (self.current_stream_idx + 1) % len(
+                self.streams
+            )
+
         with kvikio.CuFile(path, "r") as f:
-            f.read(tensor)
+            event = torch.cuda.Event()
+            event.record(stream=torch.cuda.current_stream())
+            load_stream.wait_event(event)
+            future = f.raw_read_async(tensor, load_stream.cuda_stream)
+            # f.read(tensor)
+            future.check_bytes_done()
         logger.debug(
             f"Kvikio Loading tensor {get_oneline_str(tensor, True)} from path"
             f" {path}"

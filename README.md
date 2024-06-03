@@ -19,6 +19,14 @@ pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 ### Installing Kvikio
 Check [Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
 
+Notice that >=24.06 shall be installed to get the new raw_read|write_async API. 24.06 is currently the nightly release, so please install it through the nightly channel as instructed.
+
+To update an existing version to a nightly build, the command is something like:
+
+```
+conda search rapidsai-nightly::kvikio
+conda install -c rapidsai-nightly -c conda-forge kvikio==24.08.00a libkvikio==24.08.00a
+```
 
 ## Contact
 Kun Wu kunwu2 (at) illinois (dot) edu  [![wakatime](https://wakatime.com/badge/github/K-Wu/FlashTrain.svg)](https://wakatime.com/badge/github/K-Wu/FlashTrain)
