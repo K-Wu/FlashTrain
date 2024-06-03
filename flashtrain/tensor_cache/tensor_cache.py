@@ -483,13 +483,21 @@ class TensorCache:
                     )
                     self.prefetch_saved_tensors(module_to_prefetch)
 
-    def is_last_module_in_forward(self, m: torch.nn.Module) -> bool:
+    def is_last_module_in_forward(
+        self, m: torch.nn.Module, is_pre_hook: bool = True
+    ) -> bool:
         if self.saved_forward_done_modules is None:
             return False
+
+        # When the forward hook is triggered, the reenter count has been incremented by 1 for the next reentrance. We need to offset that by 1 to reflect the reenter count of the module that just has been done.
+        reenter_count = self.module_id_to_reenter_count.get(id(m), 0)
+        if not is_pre_hook:
+            reenter_count -= 1
+
         return (
             ModuleReentrantContext(
                 module_id=id(m),
-                reenter_count=self.module_id_to_reenter_count.get(id(m), 0),
+                reenter_count=reenter_count,
             )
             == self.saved_forward_done_modules[-1]
         )
@@ -522,12 +530,13 @@ class TensorCache:
                     logger.debug(
                         "Skipping forward pre hook, in the backward"
                         " propagation to avoid issue in activation"
-                        f" recomputation, of {get_oneline_str(m)}({id(m)})"
+                        " recomputation, of"
+                        f" {get_oneline_str(m, True)}({id(m)})"
                     )
                     return
 
             logger.debug(
-                f"Forward pre hook for {get_oneline_str(m)}, is Linear:"
+                f"Forward pre hook for {get_oneline_str(m, True)}, is Linear:"
                 f" {'Linear' in str(m)}. Current activation context"
                 f" {self.current_activation_context}."
             )
@@ -536,9 +545,9 @@ class TensorCache:
                 # The runtime is to do the forward logic within module m.
                 self.module_id_to_module[id(m)] = weakref.ref(m)
             else:
-                logger.info(
-                    f"Module {get_oneline_str(m)}({id(m)}) already exists in"
-                    " self.module_id_to_module"
+                logger.debug(
+                    f"Module {get_oneline_str(m, True)}({id(m)}) already"
+                    " exists in self.module_id_to_module"
                 )
 
             self.module_id_to_reenter_count[id(m)] = (
@@ -582,14 +591,16 @@ class TensorCache:
                     logger.debug(
                         "Skipping forward hook, in the backward propagation to"
                         " avoid issue in activation recomputation, for"
-                        f" {get_oneline_str(m)}({id(m)})"
+                        f" {get_oneline_str(m, True)}({id(m)})"
                     )
                     return
                 else:
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
 
-            logger.debug(f"Forward hook for {get_oneline_str(m)}({id(m)})")
+            logger.debug(
+                f"Forward hook for {get_oneline_str(m, True)}({id(m)})"
+            )
             # The runtime has finished the forward logic within module m.
             assert not isinstance(
                 self.forward_module_scope_stack[-1], ActivationContext
@@ -605,7 +616,8 @@ class TensorCache:
     def get_full_backward_pre_hook(self) -> Callable[..., None]:
         def full_backward_pre_hook(m, grad_output) -> None:
             logger.debug(
-                f"Full backward pre hook for ({id(m)}) {get_oneline_str(m)}"
+                f"Full backward pre hook for ({id(m)})"
+                f" {get_oneline_str(m, True)}"
             )
             if self.enable_activation_context_recording:
                 activation_context = (
@@ -643,9 +655,9 @@ class TensorCache:
         def full_backward_hook(m, grad_input, grad_output) -> None:
             if all_is_none(grad_input):
                 logger.warning(
-                    f"All grad_input is None for {get_oneline_str(m)}. This"
-                    " may trigger pre-mature cache clean up! We delay the"
-                    " clean up of the cache to the beginning of the next"
+                    f"All grad_input is None for {get_oneline_str(m, True)}."
+                    " This may trigger pre-mature cache clean up! We delay"
+                    " the clean up of the cache to the beginning of the next"
                     " forward pass."
                 )
                 # Delay the clean up of the cache to the beginning of the next forward pass.
@@ -658,7 +670,7 @@ class TensorCache:
                 return
 
             logger.debug(
-                f"Full backward hook for ({id(m)}) {get_oneline_str(m)},"
+                f"Full backward hook for ({id(m)}) {get_oneline_str(m, True)},"
             )
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -707,6 +719,9 @@ class TensorCache:
 
                 if self.offloading_disabled:
                     # No need to store. Continue to the next step to register it into the other data structures.
+                    logger.info(
+                        f"Offloading is disabled. Skip packing of {tensor_id}."
+                    )
                     self.tensor_id_to_loaded_tensor[tensor_id] = tensor
                 else:
                     if tensor_id not in self.tensor_id_to_tensor_to_store:
@@ -762,8 +777,6 @@ class TensorCache:
         def unpack_hook(
             tensor_id_or_tensor: TensorEqID | torch.Tensor,
         ) -> torch.Tensor:
-            if self.offloading_disabled:
-                return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext

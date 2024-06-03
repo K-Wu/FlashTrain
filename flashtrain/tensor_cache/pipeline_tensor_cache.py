@@ -7,6 +7,7 @@ from .tensor_cache import (
 from .utils import TensorEqID
 from typing import Callable, Any, Optional
 from enum import Enum
+from ..logger import logger, get_oneline_str
 
 
 class Stage(Enum):
@@ -113,6 +114,7 @@ class PipelineTensorCache:
 
         self.next_microbatch_idx = next_idx_microbatch
         self.next_stage = next_stage
+        logger.info(f"Set stage to {stage}, microbatch {idx_microbatch}")
 
     def wait_current_stage(self):
         if self.current_stage == Stage.FORWARD:
@@ -134,6 +136,11 @@ class PipelineTensorCache:
                 self.tensor_caches[
                     self.current_microbatch_idx
                 ].offloading_disabled = True
+                logger.info(
+                    "Disable pack/unpack hooks, in microbatch"
+                    f" {self.current_microbatch_idx}, for ({id(m)})"
+                    f" {get_oneline_str(m, True)}"
+                )
 
             # Prefetch the saved tensors for the first module in the next microbatch if this is the last module of this microbatch
             elif self.next_stage == Stage.BACKWARD and self.tensor_caches[
@@ -156,14 +163,18 @@ class PipelineTensorCache:
             if (
                 self.tensor_caches[
                     self.current_microbatch_idx
-                ].is_last_module_in_forward(m)
+                ].is_last_module_in_forward(m, is_pre_hook=False)
                 and self.next_stage == Stage.BACKWARD
                 and self.next_microbatch_idx == self.current_microbatch_idx
             ):
                 self.tensor_caches[
                     self.current_microbatch_idx
                 ].offloading_disabled = False
-
+                logger.info(
+                    "Reenable pack/unpack hooks, in microbatch"
+                    f" {self.current_microbatch_idx}, after ({id(m)})"
+                    f" {get_oneline_str(m, True)}"
+                )
             self.tensor_caches_forward_hook[self.current_microbatch_idx](
                 m, inputs, outputs
             )
