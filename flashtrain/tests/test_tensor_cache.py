@@ -213,8 +213,8 @@ class SimpleModelTestWithCache(TestCase):
             with torch.autograd.graph.saved_tensors_hooks(
                 pack_hook,
                 unpack_hook,
-                # TC.dummy_pack_hook,
-                # TC.dummy_unpack_hook,
+                # TC.dummy_hooks.dummy_pack_hook,
+                # TC.dummy_hooks.dummy_unpack_hook,
             ):
                 if use_checkpoint:
                     # Adapted from https://github.com/prigoyal/pytorch_memonger/blob/master/tutorial/Checkpointing_for_PyTorch_models.ipynb

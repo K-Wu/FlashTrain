@@ -17,6 +17,7 @@ from ..logger import logger, get_oneline_str
 from .utils import TensorEqID
 from .adapters import AdapterBase, TorchBuiltinIOAdapter
 from dataclasses import dataclass
+import contextlib
 
 
 def get_process_descriptor() -> str:
@@ -90,31 +91,6 @@ def is_deepspeed_megatron_activation_checkpoint_in_traceback():
             for line in trace_stack
         ]
     )
-
-
-def dummy_pack_hook(tensor):
-    logger.debug(
-        f"Dummy pack hook for {TensorEqID.from_tensor(tensor)}. Traceback"
-        f" {get_oneline_str(*['    ' + line.strip() for line in traceback.format_stack()][:-1])}"
-    )
-
-    if (
-        is_torch_activation_checkpoint_in_traceback()
-        or is_deepspeed_megatron_activation_checkpoint_in_traceback()
-    ):
-        logger.debug(
-            "Dummy pack hook in checkpoint"
-            f" {get_torch_activation_checkpoint_caller_filename_and_line()}"
-        )
-    return tensor
-
-
-def dummy_unpack_hook(tensor):
-    logger.debug(
-        f"Dummy unpack hook for {TensorEqID.from_tensor(tensor)}. Traceback"
-        f" {get_oneline_str(*['    ' + line.strip() for line in traceback.format_stack()][:-1])}"
-    )
-    return tensor
 
 
 @dataclass(frozen=True)
@@ -683,8 +659,6 @@ class TensorCache:
 
             logger.debug(
                 f"Full backward hook for ({id(m)}) {get_oneline_str(m)},"
-                f" {get_oneline_str(grad_input)},"
-                f" {get_oneline_str(grad_output)}"
             )
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -701,7 +675,7 @@ class TensorCache:
             """
             Register the tensors that are saved for backward in the forward pass.
             """
-            tensor_id = TensorEqID.from_tensor(
+            tensor_id: TensorEqID = TensorEqID.from_tensor(
                 tensor, self.lock if self.current_in_backward else None
             )
 
@@ -729,7 +703,7 @@ class TensorCache:
                 if tensor_id in self.parameters_and_inputs:
                     logger.debug(f"Tensor cache skips packing {tensor_id}")
                     return tensor
-                logger.debug(f"Packing {tensor_id}, {tensor.shape}")
+                logger.debug(f"Packing {tensor_id}")
 
                 if self.offloading_disabled:
                     # No need to store. Continue to the next step to register it into the other data structures.
@@ -803,15 +777,13 @@ class TensorCache:
                     logger.debug(
                         "Tensor cache skips unpacking, due to parameters and"
                         " inputs,"
-                        f" {TensorEqID.get_from_tensor(tensor_id_or_tensor)},"
-                        f" {tensor_id_or_tensor.shape}"
+                        f" {TensorEqID.get_from_tensor(tensor_id_or_tensor)}"
                     )
                 else:
                     logger.debug(
                         "Tensor cache skips unpacking, due to activation"
                         " recomputing,"
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, self.lock)},"
-                        f" {tensor_id_or_tensor.shape}"
+                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, self.lock)}"
                     )
                 return tensor_id_or_tensor
             else:
@@ -837,10 +809,7 @@ class TensorCache:
                             tensor_id_or_tensor
                         ] = result_tensor
 
-                logger.debug(
-                    f"Unpacking {tensor_id_or_tensor},"
-                    f" {self.tensor_id_to_loaded_tensor[tensor_id_or_tensor].shape}"
-                )
+                logger.debug(f"Unpacking {tensor_id_or_tensor}")
                 return self.tensor_id_to_loaded_tensor[tensor_id_or_tensor]
 
         return unpack_hook
