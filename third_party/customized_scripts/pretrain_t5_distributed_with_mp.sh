@@ -24,6 +24,7 @@ DISTRIBUTED_ARGS="
 "
 
 T5_ARGS="
+    --use-flash-attn-v2 \
     --enable-tensor-cache \
     --tensor-model-parallel-size 2 \
     --num-layers 12 \

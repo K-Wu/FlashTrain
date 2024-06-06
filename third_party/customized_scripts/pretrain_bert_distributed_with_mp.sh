@@ -109,6 +109,7 @@ DISTRIBUTED_ARGS="
 #    --recompute-method uniform \
 
 BERT_ARGS="
+    --use-flash-attn-v2 \
     --enable-tensor-cache \
     --bert-no-binary-head \
     --tensor-model-parallel-size 2 \

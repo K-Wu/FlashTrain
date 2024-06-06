@@ -154,6 +154,7 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
 torchrun $DISTRIBUTED_ARGS \
        "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
+       --use-flash-attn-v2 \
        --enable-tensor-cache \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \

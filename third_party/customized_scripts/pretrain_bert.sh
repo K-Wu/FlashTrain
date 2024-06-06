@@ -8,6 +8,7 @@ VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
 DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 
 BERT_ARGS="
+    --use-flash-attn-v2 \
     --enable-tensor-cache \
     --bert-no-binary-head \
     --num-layers 24 \
