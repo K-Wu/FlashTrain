@@ -16,37 +16,61 @@ HOSTNAMES_TO_CONFIGS = {
             [
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter0"},
+                    {
+                        "path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter0",
+                        "is_async": False,
+                    },
                 ),
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter1"},
+                    {
+                        "path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter1",
+                        "is_async": False,
+                    },
                 ),
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter2"},
+                    {
+                        "path": "/mnt/raid0/kunwu2/FlashTrain_temp/adapter2",
+                        "is_async": False,
+                    },
                 ),
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/nvme14/kunwu2/FlashTrain_temp"},
+                    {
+                        "path": "/mnt/nvme14/kunwu2/FlashTrain_temp",
+                        "is_async": False,
+                    },
                 ),
             ],  # Rank 0
             [
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/md1/kunwu2/FlashTrain_temp/adapter0"},
+                    {
+                        "path": "/mnt/md1/kunwu2/FlashTrain_temp/adapter0",
+                        "is_async": False,
+                    },
                 ),
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/md1/kunwu2/FlashTrain_temp/adapter1"},
+                    {
+                        "path": "/mnt/md1/kunwu2/FlashTrain_temp/adapter1",
+                        "is_async": False,
+                    },
                 ),
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/nvme7/kunwu2/FlashTrain_temp"},
+                    {
+                        "path": "/mnt/nvme7/kunwu2/FlashTrain_temp",
+                        "is_async": False,
+                    },
                 ),
                 (
                     KvikioIOAdapter,
-                    {"path": "/mnt/nvme17/kunwu2/FlashTrain_temp"},
+                    {
+                        "path": "/mnt/nvme17/kunwu2/FlashTrain_temp",
+                        "is_async": False,
+                    },
                 ),
             ],  # Rank 1
         ],

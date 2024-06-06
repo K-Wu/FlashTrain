@@ -115,6 +115,7 @@ class PipelineTensorCache:
         self.next_microbatch_idx = next_idx_microbatch
         self.next_stage = next_stage
         logger.info(f"Set stage to {stage}, microbatch {idx_microbatch}")
+        logger.error(f"Set stage to {stage}, microbatch {idx_microbatch}")
 
     def wait_current_stage(self):
         if self.current_stage == Stage.FORWARD:
@@ -139,7 +140,7 @@ class PipelineTensorCache:
                 logger.info(
                     "Disable pack/unpack hooks, in microbatch"
                     f" {self.current_microbatch_idx}, for ({id(m)})"
-                    f" {get_oneline_str(m, True)}"
+                    f" {get_oneline_str(m._get_name())}"
                 )
 
             # Prefetch the saved tensors for the first module in the next microbatch if this is the last module of this microbatch
@@ -173,7 +174,7 @@ class PipelineTensorCache:
                 logger.info(
                     "Reenable pack/unpack hooks, in microbatch"
                     f" {self.current_microbatch_idx}, after ({id(m)})"
-                    f" {get_oneline_str(m, True)}"
+                    f" {get_oneline_str(m._get_name())}"
                 )
             self.tensor_caches_forward_hook[self.current_microbatch_idx](
                 m, inputs, outputs

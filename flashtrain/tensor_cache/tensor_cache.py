@@ -18,6 +18,7 @@ from .utils import TensorEqID
 from .adapters import AdapterBase, TorchBuiltinIOAdapter
 from dataclasses import dataclass
 import contextlib
+import math
 
 
 def get_process_descriptor() -> str:
@@ -233,7 +234,7 @@ class TensorCache:
 
         ##
         ## Auxiliary
-        self.executor = concurrent.futures.ThreadPoolExecutor()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.lock = threading.Lock()
         self.parameters_and_inputs = set()
 
@@ -521,7 +522,7 @@ class TensorCache:
 
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
-        def forward_pre_hook(m, inputs) -> None:
+        def forward_pre_hook(m: torch.nn.Module, inputs) -> None:
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
@@ -531,14 +532,20 @@ class TensorCache:
                         "Skipping forward pre hook, in the backward"
                         " propagation to avoid issue in activation"
                         " recomputation, of"
-                        f" {get_oneline_str(m, True)}({id(m)})"
+                        f" {get_oneline_str(m._get_name())}({id(m)})"
                     )
                     return
 
             logger.debug(
-                f"Forward pre hook for {get_oneline_str(m, True)}, is Linear:"
-                f" {'Linear' in str(m)}. Current activation context"
-                f" {self.current_activation_context}."
+                f"Forward pre hook for {get_oneline_str(m._get_name())}, is"
+                f" Linear: {'Linear' in str(m._get_name())}. Current"
+                f" activation context {self.current_activation_context}."
+            )
+
+            logger.error(
+                f"Forward pre hook for {get_oneline_str(m._get_name())}, is"
+                f" Linear: {'Linear' in str(m._get_name())}. Current"
+                f" activation context {self.current_activation_context}."
             )
 
             if id(m) not in self.module_id_to_module:
@@ -546,7 +553,7 @@ class TensorCache:
                 self.module_id_to_module[id(m)] = weakref.ref(m)
             else:
                 logger.debug(
-                    f"Module {get_oneline_str(m, True)}({id(m)}) already"
+                    f"Module {get_oneline_str(m._get_name())}({id(m)}) already"
                     " exists in self.module_id_to_module"
                 )
 
@@ -591,7 +598,7 @@ class TensorCache:
                     logger.debug(
                         "Skipping forward hook, in the backward propagation to"
                         " avoid issue in activation recomputation, for"
-                        f" {get_oneline_str(m, True)}({id(m)})"
+                        f" {get_oneline_str(m._get_name())}({id(m)})"
                     )
                     return
                 else:
@@ -599,7 +606,10 @@ class TensorCache:
                     self._update_current_activation_context_in_forward()
 
             logger.debug(
-                f"Forward hook for {get_oneline_str(m, True)}({id(m)})"
+                f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
+            )
+            logger.error(
+                f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
             )
             # The runtime has finished the forward logic within module m.
             assert not isinstance(
@@ -617,7 +627,7 @@ class TensorCache:
         def full_backward_pre_hook(m, grad_output) -> None:
             logger.debug(
                 f"Full backward pre hook for ({id(m)})"
-                f" {get_oneline_str(m, True)}"
+                f" {get_oneline_str(m._get_name())}"
             )
             if self.enable_activation_context_recording:
                 activation_context = (
@@ -655,10 +665,10 @@ class TensorCache:
         def full_backward_hook(m, grad_input, grad_output) -> None:
             if all_is_none(grad_input):
                 logger.warning(
-                    f"All grad_input is None for {get_oneline_str(m, True)}."
-                    " This may trigger pre-mature cache clean up! We delay"
-                    " the clean up of the cache to the beginning of the next"
-                    " forward pass."
+                    "All grad_input is None for"
+                    f" {get_oneline_str(m._get_name())}. This may trigger"
+                    " pre-mature cache clean up! We delay the clean up of the"
+                    " cache to the beginning of the next forward pass."
                 )
                 # Delay the clean up of the cache to the beginning of the next forward pass.
                 with self.lock:
@@ -670,7 +680,8 @@ class TensorCache:
                 return
 
             logger.debug(
-                f"Full backward hook for ({id(m)}) {get_oneline_str(m, True)},"
+                f"Full backward hook for ({id(m)})"
+                f" {get_oneline_str(m._get_name())},"
             )
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -691,15 +702,23 @@ class TensorCache:
                 tensor, self.lock if self.current_in_backward else None
             )
 
+            # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
             if tensor.device.type == "cpu":
-                # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
                 logger.debug(
                     f"Tensor cache skips packing CPU tensor {tensor_id}"
                 )
                 return tensor
+
+            # Skip small tensors to avoid the overhead of offloading and reloading.
+            if math.prod(tensor.size()) < 1024 * 1024:
+                logger.debug(
+                    f"Tensor cache skips packing small tensor {tensor_id}"
+                )
+                return tensor
+
+            # Skipping the pack hook in the backward propagation to avoid issue in activation recomputation.
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
-                    # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
                     logger.debug(
                         "Tensor cache skips packing in backward propagation"
                         f" {tensor_id}"
@@ -709,13 +728,16 @@ class TensorCache:
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
 
-            # We need to ensure thread-safety.
+            # Skip parameters because they will stay in memory always.
             with self.lock:
-                # Skip parameters because they will stay in memory always.
+                # We need to ensure thread-safety.
                 if tensor_id in self.parameters_and_inputs:
                     logger.debug(f"Tensor cache skips packing {tensor_id}")
                     return tensor
                 logger.debug(f"Packing {tensor_id}")
+                logger.error(
+                    f"Packing {tensor_id}, size {math.prod(tensor.size())}"
+                )
 
                 if self.offloading_disabled:
                     # No need to store. Continue to the next step to register it into the other data structures.
@@ -725,7 +747,7 @@ class TensorCache:
                     self.tensor_id_to_loaded_tensor[tensor_id] = tensor
                 else:
                     if tensor_id not in self.tensor_id_to_tensor_to_store:
-                        logger.debug(
+                        logger.info(
                             f"Adding tensor {tensor_id} into tensor to store"
                         )
                         self.tensor_id_to_filename_and_metadata[tensor_id] = (
@@ -736,6 +758,11 @@ class TensorCache:
                             tensor.dtype,
                             tensor.device,
                         )
+
+                        # Record an event so the asynchronous saving could wait until the computation completes.
+                        event = torch.cuda.Event()
+                        event.record(stream=torch.cuda.current_stream())
+
                         self.tensor_being_stored[
                             tensor_id
                         ] = self.executor.submit(
@@ -746,6 +773,7 @@ class TensorCache:
                             ],
                             self.tensor_being_stored,
                             self.lock,
+                            event,
                         )
                         self.tensor_id_to_tensor_to_store[
                             tensor_id
