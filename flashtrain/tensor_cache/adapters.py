@@ -160,6 +160,7 @@ class TorchBuiltinIOAdapter(AdapterBase):
         with torch.cuda.stream(store_stream):
             tensor = tensor.to("cpu", non_blocking=True)
 
+        # TODO: shall we use stream synchronize instead?
         # Block until the transfer finishes
         event = torch.cuda.Event()
         event.record(store_stream)
@@ -360,6 +361,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         # Current stream is stored in thread-local variable and therefore thread-safe.
         with torch.cuda.stream(store_stream):
             # By default, the destination tensor will be in pinned memory: The logic to determine if the memory should be pinned is "pin_out = (non_blocking && self.is_cuda() && options.device().is_cpu() && (options.layout() == c10::kStrided))"
+            # This is because cudaMemcpyAsync requires the destination memory to be pinned memory. Source: https://forums.developer.nvidia.com/t/cudamemcpyasync-device-to-host-need-to-synchronize-before-using-data-on-host/51750/6
             self.cpu_tensor_cache[
                 (path, tensor.shape, tensor.dtype, tensor.device)
             ] = tensor.to("cpu", non_blocking=True)

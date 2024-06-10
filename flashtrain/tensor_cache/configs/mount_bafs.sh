@@ -5,7 +5,7 @@ mount_if_not() {
         echo $2 "is mounted."
     else
         echo $2 "is not mounted."
-        sudo mount $1 $2
+        sudo mount -o data=ordered $1 $2
     fi
 }
 
