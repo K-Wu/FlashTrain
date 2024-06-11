@@ -115,7 +115,7 @@ class PipelineTensorCache:
         self.next_microbatch_idx = next_idx_microbatch
         self.next_stage = next_stage
         logger.info(f"Set stage to {stage}, microbatch {idx_microbatch}")
-        logger.error(f"Set stage to {stage}, microbatch {idx_microbatch}")
+        # logger.error(f"Set stage to {stage}, microbatch {idx_microbatch}")
 
     def wait_current_stage(self):
         if self.current_stage == Stage.FORWARD:
@@ -225,14 +225,6 @@ class PipelineTensorCache:
             )
 
         return unpack_hook
-
-    def get_saved_tensors(
-        self, module_id: ModuleReentrantContext | ActivationContext
-    ) -> None:
-        # Do it for the current microbatch's tensor cache
-        self.tensor_caches[self.current_microbatch_idx].get_saved_tensors(
-            module_id
-        )
 
     def prefetch_saved_tensors(
         self, module_id: ModuleReentrantContext | ActivationContext

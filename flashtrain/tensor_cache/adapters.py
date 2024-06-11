@@ -166,6 +166,8 @@ class TorchBuiltinIOAdapter(AdapterBase):
         event.record(store_stream)
         event.synchronize()
 
+        # TODO: Maybe parquet as the pickle_module will be faster
+        # Disable compression to improve speed
         torch.save(tensor, path, _use_new_zipfile_serialization=False)
         logger.debug(
             "Saved tensor"

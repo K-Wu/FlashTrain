@@ -92,7 +92,7 @@ class SimpleModelTestWithCache(TestCase):
                 "enable_activation_context_recording": use_checkpoint,
                 "adapter": adapters.RevolverIOAdapter(
                     [
-                        TC.TorchBuiltinIOAdapter(),
+                        adapters.TorchBuiltinIOAdapter(),
                         adapters.TorchMainMemoryIOAdapter(),
                     ]
                 ),

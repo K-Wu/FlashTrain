@@ -7,6 +7,16 @@ import time
 from typing import Optional
 
 
+def del_dict_key_if_exists(d: dict, key: ..., lock: "threading.Lock | None"):
+    if lock is None:
+        cm = contextlib.nullcontext()
+    else:
+        cm = lock
+    with cm:
+        if key in d:
+            del d[key]
+
+
 # TODO: Use SelfDeletingTempFile instead of plain str in tensor_cache's tensor_id_to_filename
 class SelfDeletingTempFile:
     # From https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
