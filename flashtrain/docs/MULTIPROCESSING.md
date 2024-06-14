@@ -5,6 +5,16 @@ Specifically, MPS is used to set the percentage of SMs allocated to each process
 
 PyTorch has the reference counting mechanism support for multi-processing under the hood, but it is still necessary to follow the best practices. See https://github.com/pytorch/pytorch/blob/main/torch/multiprocessing/cuda_multiprocessing.md, and https://pytorch.org/docs/stable/multiprocessing.html#sharing-cuda-tensors
 
+# Optimization
+We may do the following two optimizations in future.
+
+1. Use op.splice() 
+
+2. Busy loop
+
+Reference: [How fast are Linux pipes anyway?](https://mazzo.li/posts/fast-pipes.html#splicing)
+[test_os.py](https://github.com/python/cpython/blob/ca5108a46d5da3978d4bd29717ea3fbdee772e66/Lib/test/test_os.py#L416)
+
 # Shared-Memory Dictionary
 
 * [Introduction to InterProcessPyObjects](https://discuss.python.org/t/introducing-my-library-to-share-objects-across-processes/53326)
