@@ -79,6 +79,22 @@ class AdapterBase(metaclass=ABCMeta):
         """
         raise NotImplementedError
 
+    def serialize(self) -> "AdapterBase":
+        """Convert streams to number of streams because torch.cuda.Stream is not serializable. This applies similar to lock"""
+        if hasattr(self, "streams"):
+            self.streams = len(self.streams)
+        if hasattr(self, "lock"):
+            self.lock = None
+        return self
+
+    def deserialize(self) -> "AdapterBase":
+        """Convert number of streams to torch.cuda.Stream. This applies similar to lock"""
+        if hasattr(self, "streams"):
+            self.streams = [torch.cuda.Stream() for _ in range(self.streams)]
+        if hasattr(self, "lock"):
+            self.lock = threading.Lock()
+        return self
+
     # TODO: return error code
     def async_load_tensor(
         self,
@@ -160,10 +176,10 @@ class TorchBuiltinIOAdapter(AdapterBase):
         with torch.cuda.stream(store_stream):
             tensor = tensor.to("cpu", non_blocking=True)
 
-        # TODO: shall we use stream synchronize instead?
         # Block until the transfer finishes
         event = torch.cuda.Event()
         event.record(store_stream)
+        # Torch event synchronization uses cudaStreamSynchronize() under the hood.
         event.synchronize()
 
         # TODO: Maybe parquet as the pickle_module will be faster
@@ -561,6 +577,18 @@ class RevolverIOAdapter(AdapterBase):
         with thread_lock:
             tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
+
+    def serialize(self) -> "RevolverIOAdapter":
+        """Convert streams to number of streams because torch.cuda.Stream is not serializable"""
+        for adapter in self.adapters:
+            adapter.serialize()
+        return self
+
+    def deserialize(self) -> "RevolverIOAdapter":
+        """Convert number of streams to torch.cuda.Stream"""
+        for adapter in self.adapters:
+            adapter.deserialize()
+        return self
 
     def clean_up_in_backward(
         self,

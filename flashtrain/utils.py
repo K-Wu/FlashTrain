@@ -2,10 +2,6 @@ import torch
 from typing import Callable, TypeVar
 from .tensor_cache import tensor_cache as TC
 from .logger import logger, get_oneline_str
-from megatron.core.tensor_parallel.layers import (
-    RowParallelLinear,
-    ColumnParallelLinear,
-)
 
 
 # Adapted from _register_hooks_recursively at https://github.com/microsoft/DeepSpeed/blob/0fc19b6a320cf8aa0a5f6c2b1fa310bae9a70d94/deepspeed/runtime/zero/parameter_offload.py
@@ -85,7 +81,7 @@ def get_sequence_of_layers(main: torch.nn.Module) -> list[torch.nn.Module]:
 
 
 def register_transpose_of_linear_weights(
-    main: torch.nn.Module, tensor_cache: TC.TensorCache
+    main: torch.nn.Module, tensor_cache: TC.TensorCache, use_megatron=True
 ):
     """
     Recursively register a transpose of weights of Linear layers to a module and its submodules.
@@ -93,11 +89,20 @@ def register_transpose_of_linear_weights(
     """
 
     def transpose_weights(m: torch.nn.Module):
-        if (
-            isinstance(m, torch.nn.Linear)
-            or isinstance(m, RowParallelLinear)
-            or isinstance(m, ColumnParallelLinear)
-        ):
+        if use_megatron:
+            from megatron.core.tensor_parallel.layers import (
+                RowParallelLinear,
+                ColumnParallelLinear,
+            )
+
+            condition = (
+                isinstance(m, torch.nn.Linear)
+                or isinstance(m, RowParallelLinear)
+                or isinstance(m, ColumnParallelLinear)
+            )
+        else:
+            condition = isinstance(m, torch.nn.Linear)
+        if condition:
             logger.info(get_oneline_str("Adding transpose of weight in ", m))
             tensor_cache.add_inputs_or_parameters(m.weight.t())
         else:

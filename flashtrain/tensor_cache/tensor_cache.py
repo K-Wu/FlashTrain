@@ -9,18 +9,15 @@ import os
 import socket
 from typing import Callable, Any
 import weakref
-import concurrent.futures
 import threading
-import contextlib
 import traceback
 from ..logger import logger, get_oneline_str
 from .utils import TensorEqID, del_dict_key_if_exists
 from dataclasses import dataclass
-import contextlib
 import math
 from .adapters import AdapterBase
 from typing import Optional
-from .offload_engine import ThreadedOffloadEngine
+from .offload_engine import OffloadHost
 
 
 def get_process_descriptor() -> str:
@@ -150,7 +147,7 @@ class TensorCache:
         ModuleReentrantContext | ActivationContext,
     ]
 
-    offload_engine: ThreadedOffloadEngine
+    offloader: OffloadHost
 
     lock: threading.Lock
 
@@ -203,7 +200,9 @@ class TensorCache:
 
         ##
         ## Auxiliary
-        self.offload_engine = ThreadedOffloadEngine(adapter=adapter)
+        self.offloader = OffloadHost(
+            engine_type=OffloadHost.EngineType.PROCESS, adapter=adapter
+        )
 
         self.lock = threading.Lock()
         self.parameters_and_inputs = set()
@@ -291,7 +290,7 @@ class TensorCache:
         }
         if self.saved_forward_done_modules is None:
             self.saved_forward_done_modules = self.forward_done_modules.copy()
-        self.offload_engine.wait_for_storing_queue()
+        self.offloader.wait_for_storing_queue()
 
     def set_in_backward(self):
         """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
@@ -705,9 +704,9 @@ class TensorCache:
                     logger.info(
                         f"Offloading is disabled. Skip packing of {tensor_id}."
                     )
-                    self.offload_engine.add_loaded_tensor(tensor_id, tensor)
+                    self.offloader.add_loaded_tensor(tensor_id, tensor)
                 else:
-                    self.offload_engine.add_tensor_to_store(
+                    self.offloader.add_tensor_to_store(
                         tensor_id, tensor, get_process_descriptor()
                     )
 
@@ -758,9 +757,7 @@ class TensorCache:
             else:
                 # The argument is TensorEqID
                 logger.debug(f"Unpacking {tensor_id_or_tensor}")
-                return self.offload_engine.get_loaded_tensor(
-                    tensor_id_or_tensor
-                )
+                return self.offloader.get_loaded_tensor(tensor_id_or_tensor)
 
         return unpack_hook
 
@@ -768,7 +765,7 @@ class TensorCache:
         self, module_id: ModuleReentrantContext | ActivationContext
     ) -> None:
         tensor_ids = self.module_id_to_tensor_ids[module_id]
-        self.offload_engine.prefetch_saved_tensors(tensor_ids)
+        self.offloader.prefetch_saved_tensors(tensor_ids)
         return
 
     def clear_up_done_backward_modules_cache(self):
@@ -776,6 +773,7 @@ class TensorCache:
         Remove the records of tensors modules with uncleared cache require.
         When tensors are not required by any modules, remove them from dictionaries including self.tensor_id_to_tensor_to_store. In this way, the tensors can be garbage collected if no other references exist.
         """
+        tensor_ids_to_clean_up = set()
         # We need to ensure thread-safety during the backward pass.
         with self.lock:
             for module_id in self.backward_done_modules_with_cache_to_clear:
@@ -797,7 +795,8 @@ class TensorCache:
                             tensor_id,
                             None,
                         )
-                        self.offload_engine.clean_up_in_backward(tensor_id)
+                        tensor_ids_to_clean_up.add(tensor_id)
 
                 del self.module_id_to_tensor_ids[module_id]
+            self.offloader.clean_up_in_backward(tensor_ids_to_clean_up)
             self.backward_done_modules_with_cache_to_clear.clear()

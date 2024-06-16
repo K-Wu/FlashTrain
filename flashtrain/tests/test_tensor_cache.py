@@ -113,7 +113,9 @@ class SimpleModelTestWithCache(TestCase):
         tensor_cache.add_parameters_from_module(model_withcache)
         if use_recursive_do:
             for tc_ in tensor_caches:
-                register_transpose_of_linear_weights(model_withcache, tc_)
+                register_transpose_of_linear_weights(
+                    model_withcache, tc_, False
+                )
         else:
             for tc_ in tensor_caches:
                 tc_.add_inputs_or_parameters(
@@ -225,6 +227,7 @@ class SimpleModelTestWithCache(TestCase):
                     output_withcache = model_withcache(input_withcache)
 
                 loss_withcache = output_withcache.sum()
+                logger.info("Iterations wait forward.")
                 if enable_microbatch:
                     assert isinstance(tensor_cache, PTC.PipelineTensorCache)
                     tensor_cache.wait_current_stage()
@@ -239,6 +242,7 @@ class SimpleModelTestWithCache(TestCase):
                     tensor_cache.wait_forward()
                     tensor_cache.set_in_backward()
 
+                logger.info("Iterations forward end.")
                 loss_withcache.backward()
                 if enable_microbatch:
                     # Do another batch and then accumulate the gradients.
