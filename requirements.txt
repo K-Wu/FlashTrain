@@ -13,3 +13,4 @@ nltk
 sentencepiece
 einops
 hypothesis
+flash-attn

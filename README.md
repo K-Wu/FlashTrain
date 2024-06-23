@@ -3,6 +3,9 @@
 [![CodeFactor](https://www.codefactor.io/repository/github/k-wu/flashtrain/badge?s=7f86943f3ba426ae1f40ab671f340937ea231e4b)](https://www.codefactor.io/repository/github/k-wu/flashtrain)
 [![DeepSource](https://app.deepsource.com/gh/K-Wu/FlashTrain.svg/?label=active+issues&show_trend=true&token=d7YCxKKgZgyhjlQrCMVkugyJ)](https://app.deepsource.com/gh/K-Wu/FlashTrain/)
 
+## Avoid Excessive Thread Launched by `import deepspeed`
+In deepspeed/__init__.py, move `from .runtime.hybrid_engine import DeepSpeedHybridEngine` to the if clause that uses it.
+
 ## Dependencies
 
 ### Installing apex
@@ -24,6 +27,8 @@ Notice that >=24.06 shall be installed to get the new raw_read|write_async API. 
 To update an existing version to a nightly build, the command is something like:
 
 ```
+conda create --name dev_flashtrain python==3.11
+conda activate dev_flashtrain
 conda search rapidsai-nightly::kvikio
 conda install -c rapidsai-nightly -c conda-forge kvikio==24.08.00a libkvikio==24.08.00a
 ```

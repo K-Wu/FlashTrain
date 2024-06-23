@@ -38,3 +38,5 @@ today_job.sh
 
 *.json
 *.pt
+
+*.nsys-rep
