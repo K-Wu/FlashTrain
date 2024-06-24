@@ -17,6 +17,8 @@ else
 fi
 ```
 
+[Force the compatibility off at /etc/cufile.json](https://docs.nvidia.com/cuda/archive/11.4.0/gds/configuration-guide/index.html#gds-parameters).
+
 ## Troubleshoot / Reinstallation
 Make sure the following packages are all removed before reinstallation.
 ```
