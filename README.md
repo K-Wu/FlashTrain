@@ -20,7 +20,7 @@ pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 ```
 
 ### Installing GPUDirect-Storage
-Check FlashTrain/docs/GPUDIRECT_STORAGE.md
+Check flashTrain/docs/GPUDIRECT_STORAGE.md
 
 ### Installing Kvikio
 Check [Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
