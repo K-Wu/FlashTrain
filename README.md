@@ -14,10 +14,13 @@ Follow the instruction [here](https://github.com/NVIDIA/apex?tab=readme-ov-file#
 ### Installing Megatron-DeepSpeed
 Go to third_party/Megatron-DeepSpeed and follow the instruction to install Megatron-DeepSpeed from source.
 
-#### Installing Transformer-Engine
+### Installing Transformer-Engine
 ```
 pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 ```
+
+### Installing GPUDirect-Storage
+Check FlashTrain/docs/GPUDIRECT_STORAGE.md
 
 ### Installing Kvikio
 Check [Kvikio](https://docs.rapids.ai/api/kvikio/nightly/install/)
