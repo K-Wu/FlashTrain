@@ -52,7 +52,7 @@ class PeakMemoryTracker(MemoryAllocatorBase):
         self.current_memory += size
         if self.current_memory > self.peak_memory:
             self.peak_memory = self.current_memory
-        return torch.empty(size_tuple, dtype=dtype)
+        return torch.empty(size_tuple, dtype=dtype).pin_memory()
 
     def release_tensor(self, tensor: torch.Tensor):
         self.current_memory -= self._calc_size(tensor.shape, tensor.dtype)

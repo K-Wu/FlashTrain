@@ -41,6 +41,10 @@ class OffloadEngineBase(metaclass=ABCMeta):
     def wait_for_loading_queue(self) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def print_loaded_tensors(self):
+        raise NotImplementedError
+
 
 class ThreadedOffloadEngine(OffloadEngineBase):
     executor: concurrent.futures.ThreadPoolExecutor
@@ -85,12 +89,26 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         self.executor.shutdown()
 
     def get_loaded_tensor(self, tensor_id: TensorEqID) -> torch.Tensor:
-        return self.adapter.load_tensor(
-            self.tensor_id_to_filename_and_metadata[tensor_id][0],
-            self.tensor_id_to_filename_and_metadata[tensor_id][1],
-            self.tensor_id_to_filename_and_metadata[tensor_id][2],
-            self.tensor_id_to_filename_and_metadata[tensor_id][3],
-        )
+        future = None
+        with self.lock:
+            if tensor_id in self.tensor_id_to_loaded_tensor:
+                return self.tensor_id_to_loaded_tensor[tensor_id]
+            elif tensor_id in self.tensor_being_loaded:
+                future = self.tensor_being_loaded[tensor_id]
+
+        if future:
+            future.result()
+            return self.tensor_id_to_loaded_tensor[tensor_id]
+        else:
+            tensor = self.adapter.load_tensor(
+                self.tensor_id_to_filename_and_metadata[tensor_id][0],
+                self.tensor_id_to_filename_and_metadata[tensor_id][1],
+                self.tensor_id_to_filename_and_metadata[tensor_id][2],
+                self.tensor_id_to_filename_and_metadata[tensor_id][3],
+            )
+            with self.lock:
+                self.tensor_id_to_loaded_tensor[tensor_id] = tensor
+            return tensor
 
     def wait_for_storing_queue(self) -> None:
         """
@@ -98,7 +116,10 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         """
         # Keep the argument of wait() unmuted to avoid possible issues.
         tensor_being_stored = [_ for _ in self.tensor_being_stored.values()]
-        concurrent.futures.wait(tensor_being_stored)
+        results = concurrent.futures.wait(tensor_being_stored)
+        if len(self.tensor_being_stored) > 0:
+            logger.error(results)
+            logger.error(self.tensor_being_stored)
         assert len(self.tensor_being_stored) == 0
 
     def wait_for_loading_queue(self) -> None:
@@ -116,7 +137,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         tensor: torch.Tensor,
         process_descriptor: str,
     ) -> None:
-        logger.info(f"Adding tensor {tensor_id} into tensor to store")
+        logger.debug(f"Adding tensor {tensor_id} into tensor to store")
         self.tensor_id_to_filename_and_metadata[tensor_id] = (
             self.adapter.create_new_filename(process_descriptor, tensor),
             tensor.shape,
@@ -131,6 +152,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         self.tensor_being_stored[tensor_id] = self.executor.submit(
             self.adapter.async_save_tensor,
             tensor,
+            tensor_id,
             self.tensor_id_to_filename_and_metadata[tensor_id][0],
             self.tensor_being_stored,
             self.lock,
@@ -167,6 +189,10 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                             0:4
                         ]
                     )
+                if tensor_id not in self.tensor_id_to_loaded_tensor:
+                    logger.error(
+                        f"The tensor {tensor_id} is not loaded during removal!"
+                    )
                 del_dict_key_if_exists(
                     self.tensor_id_to_loaded_tensor,
                     tensor_id,
@@ -183,6 +209,11 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                     None,
                 )
 
+    def print_loaded_tensors(self):
+        logger.error(self.tensor_id_to_loaded_tensor)
+
+    # TODO: tensors with ToCopyBackward0 as grad_fn were loaded but never used in the backward propagation
+
 
 class CommandType(Enum):
     ADD_TENSOR_TO_STORE = 0
@@ -192,6 +223,7 @@ class CommandType(Enum):
     WAIT_FOR_STORING_QUEUE = 4
     WAIT_FOR_LOADING_QUEUE = 5
     TERMINATE = 6
+    PRINT_LOADED_TENSORS = 7
 
 
 # @thread_wrapped_func
@@ -207,11 +239,11 @@ def engine_main_loop(
     logger.setLevel(log_level)
     engine = ThreadedOffloadEngine(adapter, max_workers, log_level)
     result_queue.put("Started")
-    logger.info("Engine started")
+    logger.info("engine_main_loop started the engine")
     while True:
         # TODO: add busy loop as an option. https://docs.python.org/3/library/multiprocessing.html#multiprocessing.Queue.get_nowait
         cmd, args = command_queue.get()
-        logger.info("Get Command")
+        logger.debug("Get Command")
         match cmd:
             case CommandType.ADD_TENSOR_TO_STORE:
                 engine.add_tensor_to_store(*args)
@@ -224,11 +256,14 @@ def engine_main_loop(
                 engine.clean_up_in_backward(*args)
                 result_queue.put("Done")
             case CommandType.WAIT_FOR_STORING_QUEUE:
-                logger.info("Waiting")
+                logger.debug("Waiting")
                 engine.wait_for_storing_queue()
                 result_queue.put("Done")
             case CommandType.WAIT_FOR_LOADING_QUEUE:
                 engine.wait_for_loading_queue()
+                result_queue.put("Done")
+            case CommandType.PRINT_LOADED_TENSORS:
+                engine.print_loaded_tensors()
                 result_queue.put("Done")
             case CommandType.TERMINATE:
                 break
@@ -247,15 +282,16 @@ class ProcessOffloadEngine(OffloadEngineBase):
         max_workers: int = 1,
         log_level: int = logging.INFO,
     ):
-        mp.set_start_method("spawn", force=True)
+        ctx = mp.get_context("spawn")
+        # mp.set_start_method("spawn", force=True)
         # TODO: Use op.splice() as the underlying rw operation of mp.Queue()
-        self.command_queue = mp.Queue()
-        self.result_queue = mp.Queue()
+        self.command_queue = ctx.Queue()
+        self.result_queue = ctx.Queue()
 
         if adapter is not None:
             adapter = adapter.serialize()
 
-        self.process = mp.Process(
+        self.process = ctx.Process(
             target=engine_main_loop,
             args=(
                 self.command_queue,
@@ -273,7 +309,7 @@ class ProcessOffloadEngine(OffloadEngineBase):
             adapter = adapter.deserialize()
 
         self.result_queue.get()  # Get the start signal
-        logger.info("Engine started")
+        logger.info("Instantiation __init__ started the engine")
 
     def __del__(self):
         self.command_queue.put((CommandType.TERMINATE, ()))
@@ -288,7 +324,8 @@ class ProcessOffloadEngine(OffloadEngineBase):
         self.command_queue.put(
             (
                 CommandType.ADD_TENSOR_TO_STORE,
-                (tensor_id, tensor, process_descriptor),
+                # Pytorch is cowardly refusing to serialize non-leaf tensor which requires_grad, since autograd does not support crossing process boundaries.  If you just want to transfer the data, call detach() on the tensor before serializing
+                (tensor_id, tensor.detach(), process_descriptor),
             )
         )
 
@@ -309,12 +346,16 @@ class ProcessOffloadEngine(OffloadEngineBase):
 
     def wait_for_storing_queue(self) -> None:
         self.command_queue.put((CommandType.WAIT_FOR_STORING_QUEUE, ()))
-        logger.info("Waiting")
+        logger.debug("Waiting")
         self.result_queue.get()
-        logger.info("Waiting done")
+        logger.debug("Waiting done")
 
     def wait_for_loading_queue(self) -> None:
         self.command_queue.put((CommandType.WAIT_FOR_LOADING_QUEUE, ()))
+        self.result_queue.get()
+
+    def print_loaded_tensors(self):
+        self.command_queue.put((CommandType.PRINT_LOADED_TENSORS, ()))
         self.result_queue.get()
 
 
@@ -335,7 +376,7 @@ class OffloadHost:
         self,
         engine_type: EngineType,
         adapter: AdapterBase | None,
-        max_workers: int = 1,
+        max_workers: int = 4,
     ) -> None:
         self.tensor_id_to_tensor_to_store = {}
         self.tensor_id_to_loaded_tensor = {}
@@ -359,6 +400,7 @@ class OffloadHost:
 
     def get_loaded_tensor(self, tensor_id: TensorEqID) -> torch.Tensor:
         if not tensor_id in self.tensor_id_to_loaded_tensor:
+            # TODO: avoid load twice
             result_tensor = self.engine.get_loaded_tensor(tensor_id)
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
@@ -385,7 +427,7 @@ class OffloadHost:
         process_descriptor: str,
     ) -> None:
         if tensor_id not in self.tensor_id_to_tensor_to_store:
-            logger.info(f"Adding tensor {tensor_id} into tensor to store")
+            logger.debug(f"Adding tensor {tensor_id} into tensor to store")
             self.engine.add_tensor_to_store(
                 tensor_id, tensor, process_descriptor
             )
@@ -426,3 +468,7 @@ class OffloadHost:
                 )
 
         self.engine.clean_up_in_backward(tensor_ids)
+
+    def print_loaded_tensors(self):
+        logger.error(self.tensor_id_to_loaded_tensor)
+        self.engine.print_loaded_tensors()

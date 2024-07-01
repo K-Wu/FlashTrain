@@ -8,6 +8,11 @@ import threading
 from typing import Any
 import os
 from abc import ABCMeta, abstractmethod
+from .host_pinned_memory_allocator import (
+    HostPinnedMemoryAllocator,
+    MemoryAllocatorBase,
+    PeakMemoryTracker,
+)
 
 
 def create_new_filename(
@@ -39,7 +44,6 @@ class AdapterBase(metaclass=ABCMeta):
         """
         raise NotImplementedError
 
-    # TODO: pass in a cuda event to wait for the computation to finish
     @abstractmethod
     def save_tensor(
         self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
@@ -49,22 +53,20 @@ class AdapterBase(metaclass=ABCMeta):
         """
         raise NotImplementedError
 
-    # TODO: pass in a cuda event to wait for the computation to finish
     # TODO: return error code
     def async_save_tensor(
         self,
         tensor: torch.Tensor,
+        tensor_id: TensorEqID,
         path: str,
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
         thread_lock: threading.Lock,
         event: torch.cuda.Event,
     ):
         self.save_tensor(tensor, path, event)
-        logger.debug(
-            f"Async wrapper saved tensor {TensorEqID.from_tensor(tensor)}"
-        )
+        logger.debug(f"Async wrapper saved tensor {tensor_id}")
         with thread_lock:
-            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
+            del tensor_being_stored[tensor_id]
 
     @abstractmethod
     def load_tensor(
@@ -341,14 +343,34 @@ class TorchMainMemoryIOAdapter(AdapterBase):
     streams: list[torch.cuda.Stream]
     current_stream_idx: int
     lock: threading.Lock
+    use_host_pinned_memory_allocator: bool
+    host_pinned_memory_allocator: MemoryAllocatorBase | None
 
-    def __init__(self, num_streams: int = 2):
+    def __init__(
+        self,
+        num_streams: int = 2,
+        use_host_pinned_memory_allocator: bool = True,
+    ):
         self.cpu_tensor_cache = {}
         self.streams = []
         for _ in range(num_streams):
             self.streams.append(torch.cuda.Stream())
         self.current_stream_idx = 0
         self.lock = threading.Lock()
+        self.use_host_pinned_memory_allocator = (
+            use_host_pinned_memory_allocator
+        )
+
+        self.host_pinned_memory_allocator = None
+        if self.use_host_pinned_memory_allocator:
+            self.host_pinned_memory_allocator = PeakMemoryTracker(0)
+
+    def instantiate_host_pinned_memory_allocator(self):
+        assert self.use_host_pinned_memory_allocator
+        assert isinstance(self.host_pinned_memory_allocator, PeakMemoryTracker)
+        self.host_pinned_memory_allocator = HostPinnedMemoryAllocator(
+            self.host_pinned_memory_allocator.peak_memory
+        )
 
     def create_new_filename(
         self,
@@ -366,33 +388,52 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         """
         Save the tensor to the file.
         """
-        with self.lock:
-            store_stream = self.streams[self.current_stream_idx]
-            self.current_stream_idx = (self.current_stream_idx + 1) % len(
-                self.streams
+        try:
+            with self.lock:
+                store_stream = self.streams[self.current_stream_idx]
+                self.current_stream_idx = (self.current_stream_idx + 1) % len(
+                    self.streams
+                )
+
+            if self.use_host_pinned_memory_allocator:
+                with self.host_pinned_memory_allocator.lock:
+                    self.cpu_tensor_cache[
+                        (path, tensor.shape, tensor.dtype, tensor.device)
+                    ] = self.host_pinned_memory_allocator.allocate_tensor(
+                        tensor.shape, tensor.dtype
+                    )
+
+                store_stream.wait_event(event)
+
+                with torch.cuda.stream(store_stream):
+                    self.cpu_tensor_cache[
+                        (path, tensor.shape, tensor.dtype, tensor.device)
+                    ].copy_(tensor, non_blocking=True)
+            else:
+                # Wait until the computation finishes before saving the tensor
+                store_stream.wait_event(event)
+
+                # non_blocking copy uses cudaMemcpyAsync on current stream. ccording to /pytorch/aten/src/ATen/native/cuda/Copy.cu
+                # Current stream is stored in thread-local variable and therefore thread-safe.
+                with torch.cuda.stream(store_stream):
+                    # By default, the destination tensor will be in pinned memory: The logic to determine if the memory should be pinned is "pin_out = (non_blocking && self.is_cuda() && options.device().is_cpu() && (options.layout() == c10::kStrided))"
+                    # This is because cudaMemcpyAsync requires the destination memory to be pinned memory. Source: https://forums.developer.nvidia.com/t/cudamemcpyasync-device-to-host-need-to-synchronize-before-using-data-on-host/51750/6
+                    self.cpu_tensor_cache[
+                        (path, tensor.shape, tensor.dtype, tensor.device)
+                    ] = tensor.to("cpu", non_blocking=True)
+
+            # Block until the transfer finishes
+            event = torch.cuda.Event()
+            event.record(store_stream)
+            event.synchronize()
+
+            logger.debug(
+                f"Main Memory Saved tensor {TensorEqID.from_tensor(tensor)} to"
+                f" {(path, tensor.shape, tensor.dtype, tensor.device)}"
             )
 
-        # Wait until the computation finishes before saving the tensor
-        store_stream.wait_event(event)
-
-        # non_blocking copy uses cudaMemcpyAsync on current stream. ccording to /pytorch/aten/src/ATen/native/cuda/Copy.cu
-        # Current stream is stored in thread-local variable and therefore thread-safe.
-        with torch.cuda.stream(store_stream):
-            # By default, the destination tensor will be in pinned memory: The logic to determine if the memory should be pinned is "pin_out = (non_blocking && self.is_cuda() && options.device().is_cpu() && (options.layout() == c10::kStrided))"
-            # This is because cudaMemcpyAsync requires the destination memory to be pinned memory. Source: https://forums.developer.nvidia.com/t/cudamemcpyasync-device-to-host-need-to-synchronize-before-using-data-on-host/51750/6
-            self.cpu_tensor_cache[
-                (path, tensor.shape, tensor.dtype, tensor.device)
-            ] = tensor.to("cpu", non_blocking=True)
-
-        # Block until the transfer finishes
-        event = torch.cuda.Event()
-        event.record(store_stream)
-        event.synchronize()
-
-        logger.debug(
-            f"Main Memory Saved tensor {TensorEqID.from_tensor(tensor)} to"
-            f" {(path, tensor.shape, tensor.dtype, tensor.device)}"
-        )
+        except Exception as e:
+            logger.critical(f"Error in saving tensor to path {path}: {e}")
 
     def load_tensor(
         self,
@@ -428,7 +469,21 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         )
         return tensor
 
-    # TODO: implement clean_up_when_end which does nothing
+    def clean_up_in_backward(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        if self.use_host_pinned_memory_allocator and isinstance(
+            self.host_pinned_memory_allocator, HostPinnedMemoryAllocator
+        ):
+            with self.host_pinned_memory_allocator.lock:
+                self.host_pinned_memory_allocator.release_tensor(
+                    self.cpu_tensor_cache[(path, shape, dtype, device)]
+                )
+        del self.cpu_tensor_cache[(path, shape, dtype, device)]
 
 
 class TorchDummyIOAdapter(AdapterBase):
@@ -482,8 +537,6 @@ class TorchDummyIOAdapter(AdapterBase):
         )
         return tensor
 
-    # TODO: implement clean_up_when_end which does nothing
-
 
 class RevolverIOAdapter(AdapterBase):
     adapters: list[KvikioIOAdapter | Any]
@@ -529,6 +582,7 @@ class RevolverIOAdapter(AdapterBase):
     def async_save_tensor(
         self,
         tensor: torch.Tensor,
+        tensor_id: TensorEqID,
         path: str,
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
         thread_lock: threading.Lock,
@@ -536,7 +590,7 @@ class RevolverIOAdapter(AdapterBase):
     ):
         self.save_tensor(tensor, path, event)
         with thread_lock:
-            del tensor_being_stored[TensorEqID.from_tensor(tensor)]
+            del tensor_being_stored[tensor_id]
 
     def load_tensor(
         self,
@@ -599,5 +653,3 @@ class RevolverIOAdapter(AdapterBase):
     ):
         for adapter in self.adapters:
             adapter.clean_up_in_backward(path, shape, dtype, device)
-
-    # TODO: implement clean_up_when_end which does nothing

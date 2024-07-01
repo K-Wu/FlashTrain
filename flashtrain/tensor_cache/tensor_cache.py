@@ -102,6 +102,7 @@ class TensorCache:
     enable_activation_context_recording: bool
     enable_prefetch: bool
     implicit_wait_and_set_in_backward: bool
+    num_ignored_last_modules: int
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -132,8 +133,13 @@ class TensorCache:
     forward_done_modules: list[ModuleReentrantContext | ActivationContext]
     last_module_in_forward: ModuleReentrantContext | ActivationContext | None
     last_module_in_backward: ModuleReentrantContext | ActivationContext | None
+    # The last module in the forward pass is kept in the GPU memory if the next stage is the back propagation of the same microbatch. If the current backward propagation stage is about to finish, the last module in forward pass in the next microbatch's backward propagation is prefetched in the GPU memory.
     saved_forward_done_modules: (
         list[ModuleReentrantContext | ActivationContext] | None
+    )
+    # The last two (by default) modules are kept in the GPU memory and never offloaded or reloaded/prefetched, i.e., ModelLoss and ModelLMHead.
+    saved_ignored_last_modules: (
+        set[ModuleReentrantContext | ActivationContext] | None
     )
     backward_done_modules: set[ModuleReentrantContext | ActivationContext]
     backward_done_modules_with_cache_to_clear: set[
@@ -154,7 +160,7 @@ class TensorCache:
     parameters: set[TensorEqID]
 
     current_in_backward: bool
-    diable_pack_unpack_hook: bool
+    disable_pack_unpack_hook: bool
 
     def __init__(
         self,
@@ -162,10 +168,11 @@ class TensorCache:
         enable_prefetch=True,
         adapter: Optional[AdapterBase] = None,
         implicit_wait_and_set_in_backward: bool = False,
+        num_ignored_last_modules: int = 2,
         # Skipping the offloading and reloading of the last module in the forward pass to avoid the issue of the last module being stored and immediately reloaded in the backward pass.
     ):
         ##
-        ## Options
+        ## Knobs
         self.enable_activation_context_recording = (
             enable_activation_context_recording
         )
@@ -173,6 +180,7 @@ class TensorCache:
         self.implicit_wait_and_set_in_backward = (
             implicit_wait_and_set_in_backward
         )
+        self.num_ignored_last_modules = num_ignored_last_modules
 
         ##
         ## Dynamic / Change with new (micro-)batches
@@ -196,12 +204,13 @@ class TensorCache:
         ## No changes across (micro-)batches
         self.module_id_to_module = {}
         self.saved_forward_done_modules = None
+        self.saved_ignored_last_modules = set()
         self.next_module_to_previous_module = {}
 
         ##
         ## Auxiliary
         self.offloader = OffloadHost(
-            engine_type=OffloadHost.EngineType.PROCESS, adapter=adapter
+            engine_type=OffloadHost.EngineType.THREAD, adapter=adapter
         )
 
         self.lock = threading.Lock()
@@ -270,10 +279,20 @@ class TensorCache:
 
         if self.saved_forward_done_modules is None:
             self.saved_forward_done_modules = self.forward_done_modules.copy()
+            if self.num_ignored_last_modules > 0:
+                self.saved_ignored_last_modules = set(
+                    self.saved_forward_done_modules[
+                        -self.num_ignored_last_modules :
+                    ]
+                )
 
-        # Clear all the data structures that are only used in the previous backward pass.
+        # Clear all the data structures that are only used in the backward pass that is just finished.
+        # logger.error(get_oneline_str("backward_done_modules", self.backward_done_modules))
         self.forward_done_modules.clear()
         self.backward_done_modules.clear()
+        self.offloader.print_loaded_tensors()
+        # for tensor_id in self.offloader.engine.tensor_id_to_loaded_tensor:
+        #     logger.error(tensor_id, self.tensor_id_to_module_ids[tensor_id])
 
     def set_in_forward(self):
         """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is a must when activation context recording is enabled."""
@@ -290,6 +309,12 @@ class TensorCache:
         }
         if self.saved_forward_done_modules is None:
             self.saved_forward_done_modules = self.forward_done_modules.copy()
+            if self.num_ignored_last_modules > 0:
+                self.saved_ignored_last_modules = set(
+                    self.saved_forward_done_modules[
+                        -self.num_ignored_last_modules :
+                    ]
+                )
         self.offloader.wait_for_storing_queue()
 
     def set_in_backward(self):
@@ -363,7 +388,7 @@ class TensorCache:
             )
         else:
             logger.debug("Not in an activation checkpoint region")
-            if not self.current_activation_context is None:
+            if self.current_activation_context is not None:
                 # We exit an activation checkpoint region.
                 self.current_activation_context = None
                 self.forward_done_modules.append(
@@ -455,18 +480,25 @@ class TensorCache:
         if not is_pre_hook:
             reenter_count -= 1
 
+        # TODO: add support to multiple modules
         return (
             ModuleReentrantContext(
                 module_id=id(m),
                 reenter_count=reenter_count,
             )
-            == self.saved_forward_done_modules[-1]
+            == self.saved_forward_done_modules[
+                -1 - self.num_ignored_last_modules
+            ]
         )
 
     def prefetch_last_module_in_forward_if_not_None(self):
         # Do the prefetch
-        if not self.saved_forward_done_modules is None:
-            self.prefetch_saved_tensors(self.saved_forward_done_modules[-1])
+        if self.saved_forward_done_modules is not None:
+            self.prefetch_saved_tensors(
+                self.saved_forward_done_modules[
+                    -1 - self.num_ignored_last_modules
+                ]
+            )
 
     def is_last_module_in_backward(self, m: torch.nn.Module) -> bool:
         if self.saved_forward_done_modules is None:
@@ -496,17 +528,17 @@ class TensorCache:
                     )
                     return
 
-            logger.debug(
+            logger.info(
                 f"Forward pre hook for {get_oneline_str(m._get_name())}, is"
                 f" Linear: {'Linear' in str(m._get_name())}. Current"
                 f" activation context {self.current_activation_context}."
             )
 
-            # logger.error(
-            #     f"Forward pre hook for {get_oneline_str(m._get_name())}, is"
-            #     f" Linear: {'Linear' in str(m._get_name())}. Current"
-            #     f" activation context {self.current_activation_context}."
-            # )
+            logger.error(
+                f"Forward pre hook for {get_oneline_str(m._get_name())}, is"
+                f" Linear: {'Linear' in str(m._get_name())}. Current"
+                f" activation context {self.current_activation_context}."
+            )
 
             if id(m) not in self.module_id_to_module:
                 # The runtime is to do the forward logic within module m.
@@ -565,12 +597,12 @@ class TensorCache:
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
 
-            logger.debug(
+            logger.info(
                 f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
             )
-            # logger.error(
-            #     f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
-            # )
+            logger.error(
+                f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
+            )
             # The runtime has finished the forward logic within module m.
             assert not isinstance(
                 self.forward_module_scope_stack[-1], ActivationContext
@@ -671,8 +703,9 @@ class TensorCache:
 
             # Skip small tensors to avoid the overhead of offloading and reloading.
             if math.prod(tensor.size()) < 1024 * 1024:
-                logger.debug(
-                    f"Tensor cache skips packing small tensor {tensor_id}"
+                logger.info(
+                    f"Tensor is small. Skip packing of tensor {tensor_id},"
+                    f" size {math.prod(tensor.size())}"
                 )
                 return tensor
 
@@ -692,17 +725,28 @@ class TensorCache:
             with self.lock:
                 # We need to ensure thread-safety.
                 if tensor_id in self.parameters_and_inputs:
-                    logger.debug(f"Tensor cache skips packing {tensor_id}")
+                    logger.info(
+                        f"Parameters and inputs. Skip packing of {tensor_id},"
+                        f" size {math.prod(tensor.size())}."
+                    )
                     return tensor
-                logger.debug(f"Packing {tensor_id}")
+
+                logger.info(
+                    f"Packing {tensor_id}, size {math.prod(tensor.size())}"
+                )
                 logger.error(
                     f"Packing {tensor_id}, size {math.prod(tensor.size())}"
                 )
 
-                if self.offloading_disabled:
+                if self.offloading_disabled or (
+                    self.saved_ignored_last_modules is not None
+                    and self.forward_module_scope_stack[-1]
+                    in self.saved_ignored_last_modules
+                ):
                     # No need to store. Continue to the next step to register it into the other data structures.
                     logger.info(
-                        f"Offloading is disabled. Skip packing of {tensor_id}."
+                        "Offloading is disabled/ignored. Skip packing of"
+                        f" {tensor_id}, size {math.prod(tensor.size())}."
                     )
                     self.offloader.add_loaded_tensor(tensor_id, tensor)
                 else:
@@ -778,7 +822,7 @@ class TensorCache:
         with self.lock:
             for module_id in self.backward_done_modules_with_cache_to_clear:
                 for tensor_id in self.module_id_to_tensor_ids[module_id]:
-                    logger.debug(
+                    logger.error(
                         f"Removing tensor from tensor cache {tensor_id} for"
                         f" module {module_id}. Modules to clear"
                         f" {self.backward_done_modules_with_cache_to_clear}"
