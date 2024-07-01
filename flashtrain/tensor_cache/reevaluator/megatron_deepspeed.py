@@ -1,5 +1,6 @@
 """Adapted from third_party/Megatron-DeepSpeed/megatron/core/tensor_parallel/random.py (6824e31dbf21e8ba32c1ef3a6a73b15e8d1391ad).
-Reevaluation == checkpoint + use outputs in the next layer in the backward pass"""
+Reevaluation == checkpoint + use outputs in the next layer in the backward pass
+Currently it is just a mere copy from the original repo. TODO: We need to extend the unpack hook of the tensor cache that trigger the reeavluation."""
 
 import torch
 from deepspeed.accelerator import get_accelerator

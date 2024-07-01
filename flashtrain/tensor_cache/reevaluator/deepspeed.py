@@ -1,5 +1,6 @@
 """Adapted from /deepspeed/runtime/activation_checkpointing/checkpointing.py (0.14.2).
-Reevaluation == checkpoint + use outputs in the next layer in the backward pass"""
+Reevaluation == checkpoint + use outputs in the next layer in the backward pass
+Currently it is just a mere copy from the original repo. TODO: We need to extend the unpack hook of the tensor cache that trigger the reeavluation."""
 
 
 import torch

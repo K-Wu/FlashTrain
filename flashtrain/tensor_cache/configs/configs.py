@@ -113,6 +113,7 @@ def _get_rank() -> int:
 def get_adapter():
     hostname = get_hostname()
     rank = _get_rank()
+    logger.info(f"Getting adapters for hostname {hostname} and rank {rank}")
     class_and_kwargs = HOSTNAMES_TO_CONFIGS[hostname]["adapter"][rank]
     if len(class_and_kwargs) == 1:
         return class_and_kwargs[0][0](**class_and_kwargs[0][1])
