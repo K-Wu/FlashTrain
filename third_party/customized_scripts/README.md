@@ -1,8 +1,3 @@
-## Activation Checkpointing
-DeepSpeed currently only works with [Megatron legacy activation checkpointing APIs](https://github.com/microsoft/Megatron-DeepSpeed/blob/main/megatron/arguments.py#L840-L850). Check [this PR](https://github.com/microsoft/Megatron-DeepSpeed/pull/235/commits/008795f7832220b4d7ea5d29b1719923c9ac16b8) for more details.
-
-The Megatron-DeepSpeed activation checkpointing is customized so that when DeepSpeed activation checkpointing is configured, the Megatron-DeepSpeed model will use DeepSpeed activation checkpointing instead of Megatron activation checkpointing. Check [the code](https://github.com/microsoft/Megatron-DeepSpeed/blob/7eb36a11b3a9c48ed07b93692ccf22bfb5577f7e/megatron/core/tensor_parallel/random.py#L323-L330) for details.
-
 ## Slurm with Torchrun
 Use srun to launch 1 torchrun per node and let torchrun launch multiple training processes on each node. The command is like:
 
