@@ -2,7 +2,7 @@ import torch
 import math
 import threading
 from typing import Optional, Sequence
-from ..logger import logger
+from ..logger import logger, get_oneline_str
 from abc import ABCMeta, abstractmethod
 
 
@@ -94,15 +94,18 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
         dtype: torch.dtype = torch.float16,
         disable_defragmentation: bool = True,
     ):
+        self.total_size = size
+        self.dtype = dtype
         self.disable_defragmentation = disable_defragmentation
         self.lock = threading.Lock()
         self.buffer = torch.zeros(size, dtype=dtype).pin_memory()
-        self.dtype = dtype
+        self.init_states()
 
+    def init_states(self):
         # Address to contiguous size available
         self.contiguous_sizes = {}
 
-        self.contiguous_sizes[0] = size
+        self.contiguous_sizes[0] = self.total_size
 
         # Tensor id to its address
         self.tensor_addresses = {}
@@ -116,9 +119,8 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
         # Id to tensors
         self.tensor_map = {}
 
-        self.total_size = size
-        self.total_free = size
-        self.largest_contiguous = size
+        self.total_free = self.total_size
+        self.largest_contiguous = self.total_size
         self.max_allocated = 0
 
         self.count = 0
@@ -140,6 +142,21 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
         if self.largest_contiguous < size:
             if self.disable_defragmentation:
                 # TODO: create a new buffer instead
+                logger.critical(
+                    get_oneline_str(
+                        "Allocator state",
+                        "address(",
+                        len(self.tensor_addresses),
+                        ")",
+                        self.tensor_addresses,
+                        "tensor_id(",
+                        len(self.tensor_ids),
+                        ")",
+                        self.tensor_ids,
+                        "contiguous",
+                        self.contiguous_sizes,
+                    )
+                )
                 raise RuntimeError(
                     "Not enough contiguous memory to allocate tensor"
                 )
@@ -178,11 +195,12 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
         """Deletes the tensor and frees up the underlying buffer"""
         free_before = self.total_free
         tensor_id = id(tensor)
-        tensor_size = tensor.numel()
+        tensor_size = self._calc_size(tensor.shape, tensor.dtype)
+        # logger.critical(get_oneline_str("Allocator state", "address(",len(self.tensor_addresses),")",self.tensor_addresses, "tensor_id(",len(self.tensor_ids),")", self.tensor_ids,"contiguous" ,self.contiguous_sizes))
         self._release_tensor(tensor_id)
         self.total_free += tensor_size
         logger.info(
-            f"Free before release {free_before}. Released {tensor.numel()}."
+            f"Free before release {free_before}. Released {tensor_size}."
             f" Total free after {self.total_free}."
         )
         assert (
@@ -219,7 +237,9 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
         ), f"Tensor id {tensor_id} not found"
 
         address = self.tensor_addresses[tensor_id]
-        contiguous_size = self.tensor_map[tensor_id].numel()
+        contiguous_size = self._calc_size(
+            self.tensor_map[tensor_id].shape, self.tensor_map[tensor_id].dtype
+        )
 
         del self.tensor_addresses[tensor_id]
         del self.tensor_ids[address]
@@ -321,6 +341,7 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
                 or contiguous_size < self.contiguous_sizes[tensor_address]
             ):
                 tensor_address = address
+        # logger.critical(get_oneline_str("Allocator state", "address(",len(self.tensor_addresses),")",self.tensor_addresses, "tensor_id(",len(self.tensor_ids),")", self.tensor_ids,"contiguous" ,self.contiguous_sizes))
         assert tensor_address is not None, "address cannot be None"
         return tensor_address
 
@@ -331,7 +352,7 @@ class HostPinnedMemoryAllocator(MemoryAllocatorBase):
         available_contiguous_size = self.contiguous_sizes[address]
 
         assert size <= available_contiguous_size, (
-            f"Tensor numel {size} is large than available contiguous size"
+            f"Tensor size {size} is large than available contiguous size"
             f" {available_contiguous_size}"
         )
         self.count += 1

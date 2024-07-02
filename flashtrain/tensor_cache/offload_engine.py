@@ -4,7 +4,7 @@ import torch
 from .adapters import AdapterBase, TorchBuiltinIOAdapter
 import threading
 import weakref
-from ..logger import logger
+from ..logger import logger, get_oneline_str
 import logging
 import torch.multiprocessing as mp
 from enum import Enum
@@ -210,7 +210,12 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                 )
 
     def print_loaded_tensors(self):
-        logger.error(self.tensor_id_to_loaded_tensor)
+        logger.error(
+            get_oneline_str(
+                "OffloadEngine.tensor_id_to_loaded_tensor",
+                self.tensor_id_to_loaded_tensor,
+            )
+        )
 
     # TODO: tensors with ToCopyBackward0 as grad_fn were loaded but never used in the backward propagation
 
@@ -470,5 +475,10 @@ class OffloadHost:
         self.engine.clean_up_in_backward(tensor_ids)
 
     def print_loaded_tensors(self):
-        logger.error(self.tensor_id_to_loaded_tensor)
+        logger.error(
+            get_oneline_str(
+                "OffloadHost.tensor_id_to_loaded_tensor",
+                self.tensor_id_to_loaded_tensor,
+            )
+        )
         self.engine.print_loaded_tensors()

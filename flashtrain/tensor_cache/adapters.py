@@ -368,6 +368,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
     def instantiate_host_pinned_memory_allocator(self):
         assert self.use_host_pinned_memory_allocator
         assert isinstance(self.host_pinned_memory_allocator, PeakMemoryTracker)
+        # logger.critical(get_oneline_str("Peak Memory", self.host_pinned_memory_allocator.peak_memory))
         self.host_pinned_memory_allocator = HostPinnedMemoryAllocator(
             self.host_pinned_memory_allocator.peak_memory
         )
@@ -397,11 +398,14 @@ class TorchMainMemoryIOAdapter(AdapterBase):
 
             if self.use_host_pinned_memory_allocator:
                 with self.host_pinned_memory_allocator.lock:
-                    self.cpu_tensor_cache[
-                        (path, tensor.shape, tensor.dtype, tensor.device)
-                    ] = self.host_pinned_memory_allocator.allocate_tensor(
-                        tensor.shape, tensor.dtype
+                    new_tensor = (
+                        self.host_pinned_memory_allocator.allocate_tensor(
+                            tensor.shape, tensor.dtype
+                        )
                     )
+                self.cpu_tensor_cache[
+                    (path, tensor.shape, tensor.dtype, tensor.device)
+                ] = new_tensor
 
                 store_stream.wait_event(event)
 
