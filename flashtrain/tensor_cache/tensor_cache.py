@@ -102,7 +102,7 @@ class TensorCache:
     enable_activation_context_recording: bool
     enable_prefetch: bool
     implicit_wait_and_set_in_backward: bool
-    num_ignored_last_modules: int
+    ignored_module_names: set[str]
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -124,7 +124,7 @@ class TensorCache:
         ActivationContext, set[ModuleReentrantContext]
     ]
     previous_module_to_activation_context: dict[
-        ModuleReentrantContext | None, ActivationContext
+        ModuleReentrantContext | ActivationContext | None, ActivationContext
     ]
     forward_module_scope_stack: list[
         ModuleReentrantContext | ActivationContext
@@ -168,7 +168,13 @@ class TensorCache:
         enable_prefetch=True,
         adapter: Optional[AdapterBase] = None,
         implicit_wait_and_set_in_backward: bool = False,
-        num_ignored_last_modules: int = 2,
+        # Skip large tensors in the last few (non-transformer) layers and the loss layer and the numerous intermediate tensors in activation layer in the MLP blocks
+        ignored_module_names: set[str] = {
+            "LMHead",
+            "Loss",
+            "Model",
+            "ParallelMLP",
+        },
         # Skipping the offloading and reloading of the last module in the forward pass to avoid the issue of the last module being stored and immediately reloaded in the backward pass.
     ):
         ##
@@ -180,7 +186,7 @@ class TensorCache:
         self.implicit_wait_and_set_in_backward = (
             implicit_wait_and_set_in_backward
         )
-        self.num_ignored_last_modules = num_ignored_last_modules
+        self.ignored_module_names = ignored_module_names
 
         ##
         ## Dynamic / Change with new (micro-)batches
@@ -216,6 +222,12 @@ class TensorCache:
         self.lock = threading.Lock()
         self.parameters_and_inputs = set()
 
+    def is_ignored_module(self, m: torch.nn.Module) -> bool:
+        for substr in self.ignored_module_names:
+            if substr in str(m._get_name()):
+                return True
+        return False
+
     def add_parameters_from_module(self, model: torch.nn.Module):
         self.parameters_and_inputs = self.parameters_and_inputs.union(
             {TensorEqID.from_tensor(p) for p in model.parameters()}
@@ -242,6 +254,19 @@ class TensorCache:
             "Deleted inputs or parameters from cache"
             f" {get_oneline_str(', '.join({str(TensorEqID.get_from_tensor(input)) for input in inputs}))}"
         )
+
+    def build_ignored_modules_and_last_modules(self):
+        self.saved_forward_done_modules = []
+        self.saved_ignored_last_modules = set()
+        for m in self.forward_done_modules:
+            if isinstance(
+                m, ModuleReentrantContext
+            ) and self.is_ignored_module(
+                self.module_id_to_module[m.module_id]()
+            ):
+                self.saved_ignored_last_modules.add(m)
+            else:
+                self.saved_forward_done_modules.append(m)
 
     def wait_backward(self):
         if self.enable_activation_context_recording:
@@ -278,13 +303,7 @@ class TensorCache:
                 self.delayed_backward_done_modules_with_cache_to_clear.clear()
 
         if self.saved_forward_done_modules is None:
-            self.saved_forward_done_modules = self.forward_done_modules.copy()
-            if self.num_ignored_last_modules > 0:
-                self.saved_ignored_last_modules = set(
-                    self.saved_forward_done_modules[
-                        -self.num_ignored_last_modules :
-                    ]
-                )
+            self.build_ignored_modules_and_last_modules()
 
         # Clear all the data structures that are only used in the backward pass that is just finished.
         # logger.error(get_oneline_str("backward_done_modules", self.backward_done_modules))
@@ -308,13 +327,7 @@ class TensorCache:
             for idx in range(len(self.forward_done_modules) - 1)
         }
         if self.saved_forward_done_modules is None:
-            self.saved_forward_done_modules = self.forward_done_modules.copy()
-            if self.num_ignored_last_modules > 0:
-                self.saved_ignored_last_modules = set(
-                    self.saved_forward_done_modules[
-                        -self.num_ignored_last_modules :
-                    ]
-                )
+            self.build_ignored_modules_and_last_modules()
         self.offloader.wait_for_storing_queue()
 
     def set_in_backward(self):
@@ -444,11 +457,14 @@ class TensorCache:
                 " to call set_in_backward() before calling"
                 " prefetch_next_module_in_backward()."
             )
+            if self.saved_forward_done_modules is None:
+                self.build_ignored_modules_and_last_modules()
+            assert self.saved_forward_done_modules is not None
             self.next_module_to_previous_module = {
-                self.forward_done_modules[idx + 1]: self.forward_done_modules[
-                    idx
-                ]
-                for idx in range(len(self.forward_done_modules) - 1)
+                self.saved_forward_done_modules[
+                    idx + 1
+                ]: self.saved_forward_done_modules[idx]
+                for idx in range(len(self.saved_forward_done_modules) - 1)
             }
         if backward_pre_hook_target:
             backward_pre_module = ModuleReentrantContext(
@@ -476,9 +492,10 @@ class TensorCache:
             return False
 
         # When the forward hook is triggered, the reenter count has been incremented by 1 for the next reentrance. We need to offset that by 1 to reflect the reenter count of the module that just has been done.
-        reenter_count = self.module_id_to_reenter_count.get(id(m), 0)
-        if not is_pre_hook:
-            reenter_count -= 1
+        if is_pre_hook:
+            reenter_count = self.module_id_to_reenter_count.get(id(m), 0)
+        else:
+            reenter_count = self.module_id_to_reenter_count.get(id(m), 1) - 1
 
         # TODO: add support to multiple modules
         return (
@@ -486,19 +503,13 @@ class TensorCache:
                 module_id=id(m),
                 reenter_count=reenter_count,
             )
-            == self.saved_forward_done_modules[
-                -1 - self.num_ignored_last_modules
-            ]
+            == self.saved_forward_done_modules[-1]
         )
 
     def prefetch_last_module_in_forward_if_not_None(self):
         # Do the prefetch
         if self.saved_forward_done_modules is not None:
-            self.prefetch_saved_tensors(
-                self.saved_forward_done_modules[
-                    -1 - self.num_ignored_last_modules
-                ]
-            )
+            self.prefetch_saved_tensors(self.saved_forward_done_modules[-1])
 
     def is_last_module_in_backward(self, m: torch.nn.Module) -> bool:
         if self.saved_forward_done_modules is None:
@@ -731,25 +742,37 @@ class TensorCache:
                     )
                     return tensor
 
-                logger.info(
-                    f"Packing {tensor_id}, size {math.prod(tensor.size())}"
-                )
-                logger.error(
-                    f"Packing {tensor_id}, size {math.prod(tensor.size())}"
-                )
-
                 if self.offloading_disabled or (
                     self.saved_ignored_last_modules is not None
                     and self.forward_module_scope_stack[-1]
                     in self.saved_ignored_last_modules
                 ):
+                    if self.saved_ignored_last_modules is not None:
+                        logger.critical(
+                            get_oneline_str(
+                                "OFFLOADING DISABLED!!!",
+                                self.offloading_disabled,
+                                self.saved_ignored_last_modules,
+                                self.forward_module_scope_stack[-1],
+                            )
+                        )
                     # No need to store. Continue to the next step to register it into the other data structures.
                     logger.info(
                         "Offloading is disabled/ignored. Skip packing of"
                         f" {tensor_id}, size {math.prod(tensor.size())}."
                     )
+                    logger.error(
+                        "Offloading is disabled/ignored. Skip packing of"
+                        f" {tensor_id}, size {math.prod(tensor.size())}."
+                    )
                     self.offloader.add_loaded_tensor(tensor_id, tensor)
                 else:
+                    logger.info(
+                        f"Packing {tensor_id}, size {math.prod(tensor.size())}"
+                    )
+                    logger.error(
+                        f"Packing {tensor_id}, size {math.prod(tensor.size())}"
+                    )
                     self.offloader.add_tensor_to_store(
                         tensor_id, tensor, get_process_descriptor()
                     )
