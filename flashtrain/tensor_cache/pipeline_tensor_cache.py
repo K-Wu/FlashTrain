@@ -18,6 +18,8 @@ class Stage(Enum):
 class PipelineTensorCache:
     """This class contains multiple tensor cache, one for each minibatch."""
 
+    disable_offloading_in_last_module: bool
+
     tensor_caches: list[TensorCache]
     tensor_caches_forward_pre_hook: list[Callable[..., None]]
     tensor_caches_forward_hook: list[Callable[..., None]]
@@ -33,6 +35,14 @@ class PipelineTensorCache:
     next_stage: Stage | None
 
     def __init__(self, num_microbatches: int, *args, **kwargs):
+        if "disable_offloading_in_last_module" in kwargs:
+            self.disable_offloading_in_last_module = kwargs[
+                "disable_offloading_in_last_module"
+            ]
+            del kwargs["disable_offloading_in_last_module"]
+        else:
+            self.disable_offloading_in_last_module = False
+
         # The __init__ method uses num_microbatches to determine the number of tensor caches to create. And it pass all the arguments and keyword arguments to the TensorCache class.
         self.tensor_caches = [
             TensorCache(*args, **kwargs) for _ in range(num_microbatches)
@@ -128,7 +138,8 @@ class PipelineTensorCache:
         def forward_pre_hook(m, inputs) -> None:
             # Disable pack/unpack hooks if this module is to be immediately backward propagated
             if (
-                self.tensor_caches[
+                self.disable_offloading_in_last_module
+                and self.tensor_caches[
                     self.current_microbatch_idx
                 ].is_last_module_in_forward(m)
                 and self.next_stage == Stage.BACKWARD
@@ -137,6 +148,11 @@ class PipelineTensorCache:
                 self.tensor_caches[
                     self.current_microbatch_idx
                 ].offloading_disabled = True
+                logger.critical(
+                    get_oneline_str(
+                        "PTC OFFLOADING DISABLED!!!", m._get_name()
+                    )
+                )
                 logger.info(
                     "Disable pack/unpack hooks, in microbatch"
                     f" {self.current_microbatch_idx}, for ({id(m)})"
@@ -144,9 +160,13 @@ class PipelineTensorCache:
                 )
 
             # Prefetch the saved tensors for the first module in the next microbatch if this is the last module of this microbatch
-            elif self.next_stage == Stage.BACKWARD and self.tensor_caches[
-                self.current_microbatch_idx
-            ].is_last_module_in_forward(m):
+            elif (
+                self.next_stage == Stage.BACKWARD
+                and self.tensor_caches[
+                    self.current_microbatch_idx
+                ].is_last_module_in_forward(m)
+                and self.next_microbatch_idx != self.current_microbatch_idx
+            ):
                 assert self.next_microbatch_idx is not None
                 self.tensor_caches[
                     self.next_microbatch_idx
@@ -160,9 +180,26 @@ class PipelineTensorCache:
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, inputs, outputs) -> None:
+            # TODO: skip the outermost modules
+            if (
+                self.disable_offloading_in_last_module
+                and self.tensor_caches[
+                    self.current_microbatch_idx
+                ].offloading_disabled
+            ):
+                logger.critical(
+                    get_oneline_str(
+                        "PTC OFFLOADING DISABLED!!!",
+                        m._get_name(),
+                        self.tensor_caches[
+                            self.current_microbatch_idx
+                        ].is_last_module_in_forward(m, is_pre_hook=False),
+                    )
+                )
             # Reenable pack/unpack hooks if this module is to be immediately backward propagated
             if (
-                self.tensor_caches[
+                self.disable_offloading_in_last_module
+                and self.tensor_caches[
                     self.current_microbatch_idx
                 ].is_last_module_in_forward(m, is_pre_hook=False)
                 and self.next_stage == Stage.BACKWARD
