@@ -103,6 +103,7 @@ class TensorCache:
     enable_prefetch: bool
     implicit_wait_and_set_in_backward: bool
     ignored_module_names: set[str]
+    ignored_module_recursively_names: set[str]
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -131,6 +132,10 @@ class TensorCache:
     ]
     # The order of modules calling forward hook is the reverse of modules calling backward pre hook
     forward_done_modules: list[ModuleReentrantContext | ActivationContext]
+    # Store the whole stack of forward done modules, as forward_modules_whole_stack, when saved_forward_done_modules is None
+    forward_modules_whole_stack: list[
+        list[ModuleReentrantContext | ActivationContext]
+    ]
     last_module_in_forward: ModuleReentrantContext | ActivationContext | None
     last_module_in_backward: ModuleReentrantContext | ActivationContext | None
     # The last module in the forward pass is kept in the GPU memory if the next stage is the back propagation of the same microbatch. If the current backward propagation stage is about to finish, the last module in forward pass in the next microbatch's backward propagation is prefetched in the GPU memory.
@@ -170,11 +175,13 @@ class TensorCache:
         implicit_wait_and_set_in_backward: bool = False,
         # Skip large tensors in the last few (non-transformer) layers and the loss layer and the numerous intermediate tensors in activation layer in the MLP blocks
         ignored_module_names: set[str] = {
-            "LMHead",
             "Loss",
             "Model",
             "ParallelMLP",
         },
+        ignored_module_recursively_names: set[str] = {
+            "LMHead",
+        }
         # Skipping the offloading and reloading of the last module in the forward pass to avoid the issue of the last module being stored and immediately reloaded in the backward pass.
     ):
         ##
@@ -187,6 +194,9 @@ class TensorCache:
             implicit_wait_and_set_in_backward
         )
         self.ignored_module_names = ignored_module_names
+        self.ignored_module_recursively_names = (
+            ignored_module_recursively_names
+        )
 
         ##
         ## Dynamic / Change with new (micro-)batches
@@ -199,9 +209,12 @@ class TensorCache:
         self.previous_module_to_activation_context = {}
         self.forward_module_scope_stack = []
         self.forward_done_modules = []
+        self.forward_modules_whole_stack = []
         self.backward_done_modules = set()
         self.backward_done_modules_with_cache_to_clear = set()
         self.delayed_backward_done_modules_with_cache_to_clear = set()
+
+        # TODO: add tensor_id_to_reevaluator map
 
         self.current_in_backward = False
         self.offloading_disabled = False
@@ -222,8 +235,10 @@ class TensorCache:
         self.lock = threading.Lock()
         self.parameters_and_inputs = set()
 
-    def is_ignored_module(self, m: torch.nn.Module) -> bool:
-        for substr in self.ignored_module_names:
+    def is_ignored_module(
+        self, m: torch.nn.Module, ignored_module_names: set[str]
+    ) -> bool:
+        for substr in ignored_module_names:
             if substr in str(m._get_name()):
                 return True
         return False
@@ -258,15 +273,35 @@ class TensorCache:
     def build_ignored_modules_and_last_modules(self):
         self.saved_forward_done_modules = []
         self.saved_ignored_last_modules = set()
-        for m in self.forward_done_modules:
-            if isinstance(
-                m, ModuleReentrantContext
-            ) and self.is_ignored_module(
-                self.module_id_to_module[m.module_id]()
+        for idx_m, m in enumerate(self.forward_done_modules):
+            # For names specified in self.ignored_module_recursively_names, if there is any such module to ignore in forward_modules_whole_stack[idx_m], then this module m should be ignored.
+            # For example, we need to ignore the linear layer inside LMHead.
+            # On the other hand, names specified self.ignored_module_names are only compared with m itself.
+            if any(
+                [
+                    isinstance(module, ModuleReentrantContext)
+                    and self.is_ignored_module(
+                        self.module_id_to_module[module.module_id](),
+                        self.ignored_module_recursively_names,
+                    )
+                    for module in self.forward_modules_whole_stack[idx_m]
+                ]
+                + [
+                    isinstance(m, ModuleReentrantContext)
+                    and self.is_ignored_module(
+                        self.module_id_to_module[m.module_id](),
+                        self.ignored_module_names,
+                    )
+                ]
             ):
                 self.saved_ignored_last_modules.add(m)
             else:
                 self.saved_forward_done_modules.append(m)
+        logger.critical(
+            get_oneline_str(
+                "saved_ignored_last_modules", self.saved_ignored_last_modules
+            )
+        )
 
     def wait_backward(self):
         if self.enable_activation_context_recording:
@@ -322,12 +357,16 @@ class TensorCache:
         if self.enable_activation_context_recording:
             self._update_current_activation_context_in_forward()
         self.forward_module_scope_stack.clear()
-        self.next_module_to_previous_module = {
-            self.forward_done_modules[idx + 1]: self.forward_done_modules[idx]
-            for idx in range(len(self.forward_done_modules) - 1)
-        }
         if self.saved_forward_done_modules is None:
             self.build_ignored_modules_and_last_modules()
+        assert self.saved_forward_done_modules is not None
+        # Build next_module_to_previous_module based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
+        self.next_module_to_previous_module = {
+            self.saved_forward_done_modules[
+                idx + 1
+            ]: self.saved_forward_done_modules[idx]
+            for idx in range(len(self.saved_forward_done_modules) - 1)
+        }
         self.offloader.wait_for_storing_queue()
 
     def set_in_backward(self):
@@ -407,6 +446,10 @@ class TensorCache:
                 self.forward_done_modules.append(
                     self.forward_module_scope_stack[-1]
                 )
+                if self.saved_forward_done_modules is None:
+                    self.forward_modules_whole_stack.append(
+                        self.forward_module_scope_stack.copy()
+                    )
                 self.forward_module_scope_stack.pop()
 
     def _check_done_activation_context_in_backward(
@@ -460,6 +503,7 @@ class TensorCache:
             if self.saved_forward_done_modules is None:
                 self.build_ignored_modules_and_last_modules()
             assert self.saved_forward_done_modules is not None
+            # Build next_module_to_previous_module based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
             self.next_module_to_previous_module = {
                 self.saved_forward_done_modules[
                     idx + 1
@@ -622,6 +666,10 @@ class TensorCache:
             self.forward_done_modules.append(
                 self.forward_module_scope_stack[-1]
             )
+            if self.saved_forward_done_modules is None:
+                self.forward_modules_whole_stack.append(
+                    self.forward_module_scope_stack.copy()
+                )
             self.forward_module_scope_stack.pop()
 
         return forward_hook
