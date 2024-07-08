@@ -472,6 +472,7 @@ class TensorCache:
         if (
             is_torch_activation_checkpoint_in_traceback()
             or is_deepspeed_megatron_activation_checkpoint_in_traceback()
+            or is_reevaluator_in_traceback()
         ):
             (
                 filename,
