@@ -274,3 +274,26 @@ class PipelineTensorCache:
     def clear_up_done_backward_modules_cache_for_all(self):
         for tensor_cache in self.tensor_caches:
             tensor_cache.clear_up_done_backward_modules_cache()
+
+    def register_reevaluator(
+        self,
+        ctx: torch.autograd.function._ContextMethodMixin,
+        reevaluate_forward_func: Callable[
+            [torch.autograd.function._ContextMethodMixin],
+            torch.Tensor | tuple[torch.Tensor],
+        ],
+        outputs: torch.Tensor | tuple[torch.Tensor],
+    ):
+        self.tensor_caches[self.current_microbatch_idx].register_reevaluator(
+            ctx, reevaluate_forward_func, outputs
+        )
+
+    def get_reevaluated_output(self):
+        return self.tensor_caches[
+            self.current_microbatch_idx
+        ].get_reevaluated_output()
+
+    def del_reevaluated_output(self):
+        self.tensor_caches[
+            self.current_microbatch_idx
+        ].del_reevaluated_output()

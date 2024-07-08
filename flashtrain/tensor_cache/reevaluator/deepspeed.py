@@ -1,6 +1,6 @@
 """Adapted from /deepspeed/runtime/activation_checkpointing/checkpointing.py (0.14.2).
-Reevaluation == checkpoint + use outputs in the next layer in the backward pass
-Currently it is just a mere copy from the original repo. TODO: We need to extend the unpack hook of the tensor cache that trigger the reeavluation."""
+Similarly to our monkey_patched_deepspeed_checkpoint.py, in the code in this file, we reverted the fix https://github.com/microsoft/DeepSpeed/commit/51d42ab9ec826449c39d052669ca33a867c20cb5.
+"""
 
 
 import torch
@@ -32,6 +32,114 @@ from deepspeed.runtime.activation_checkpointing.checkpointing import (
 )
 
 import deepspeed.runtime.activation_checkpointing.checkpointing as checkpointing
+from .. import get_tensor_cache
+
+
+def reevaluate_forward_func(ctx):
+    see_memory_usage("In backward", force=False)
+    # removing pointers to the contiguous buffer memory
+    # so that they can be garbage collected once the checkpoints
+    # have been used
+    if checkpointing.SYNCHRONIZE:
+        get_accelerator().synchronize()
+    if checkpointing.PROFILE_TIME:
+        checkpointing.timers("backward").start()
+
+    if checkpointing.CONTIGUOUS_CHECKPOINTING:
+        # global data_offsets, size_offsets
+
+        for buffers in checkpointing.contiguous_data_buffers:
+            buffers = []
+
+        # frees up all the pointers to the checkpoints except for the ones
+        # stored by save for backward
+        checkpointing.contiguous_data_buffers = []
+        checkpointing.contiguous_size_buffers = []
+        checkpointing.data_offsets = []
+        checkpointing.size_offsets = []
+
+    see_memory_usage("In backward checkpointing code", force=False)
+    if not torch.autograd._is_checkpoint_valid():
+        raise RuntimeError(
+            "Checkpointing is not compatible with .grad(), "
+            "please use .backward() if possible"
+        )
+
+    # global transport_stream
+
+    # Rebuild deepspeed_saved_tensors
+    deepspeed_saved_tensors = ctx.saved_tensors
+    for t in deepspeed_saved_tensors:
+        if (
+            t is not None
+            and hasattr(t, "saved_data")
+            and t.saved_data is not None
+        ):
+            t.data = t.saved_data.to(t.device)
+            t.saved_data = None
+
+    if checkpointing.PARTITION_ACTIVATIONS:
+        # with get_accelerator().stream(transport_stream):
+        inputs = gather_partitioned_activations(
+            deepspeed_saved_tensors,
+            device=checkpointing.cuda_device
+            if checkpointing.CPU_CHECKPOINT
+            else None,
+        )
+        detached_inputs = detach_variable(inputs)
+    elif checkpointing.CPU_CHECKPOINT:
+        inputs = move_to_device(
+            deepspeed_saved_tensors,
+            checkpointing.cuda_device,
+            is_activation_to_checkpoint,
+        )
+        detached_inputs = detach_variable(inputs)
+    else:
+        inputs = deepspeed_saved_tensors
+        detached_inputs = detach_variable(inputs)
+
+    # Add non tensor input args
+    detached_inputs = merge_tensors(
+        tensor_objects=detached_inputs,
+        non_tensor_objects=ctx.non_tensor_args,
+        tensor_flags=ctx.tensor_flags,
+    )
+
+    # Store the current states.
+    bwd_cpu_rng_state = torch.get_rng_state()
+    bwd_cuda_rng_state = get_accelerator().get_rng_state()
+    bwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+
+    # Set the states to what it used to be before the forward pass.
+    torch.set_rng_state(ctx.fwd_cpu_rng_state)
+    _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
+    get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
+
+    # if checkpointing.PARTITION_ACTIVATIONS:
+    #     current_stream=get_accelerator().current_stream()
+    #     current_stream.wait_stream(transport_stream)
+
+    see_memory_usage(
+        "In backward checkpointing code before forward", force=False
+    )
+
+    with torch.enable_grad():
+        outputs = ctx.run_function(*detached_inputs)
+
+    see_memory_usage(
+        "In backward checkpointing code after forward", force=False
+    )
+    # Set the states back to what it was at the start of this function.
+    torch.set_rng_state(bwd_cpu_rng_state)
+    _set_cuda_rng_state(bwd_cuda_rng_state)
+    get_cuda_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
+
+    if isinstance(outputs, torch.Tensor):
+        outputs = (outputs,)
+
+    # Filter out non tensor outputs
+    outputs, _, _ = extract_tensors(all_objects=outputs)
+    return outputs
 
 
 class ReevaluatorFunction(torch.autograd.Function):
@@ -46,12 +154,14 @@ class ReevaluatorFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, run_function, all_outputs, *args):
+    def forward(
+        ctx, run_function, all_outputs, *args
+    ) -> torch.Tensor | tuple[torch.Tensor]:
         def save_args_for_backward(*all_args):
             tensor_args, non_tensor_args, tensor_flags = extract_tensors(
                 all_objects=all_args
             )
-            ctx.deepspeed_saved_tensors = tensor_args
+            ctx.save_for_backward(*tensor_args)
             ctx.non_tensor_args = non_tensor_args
             ctx.tensor_flags = tensor_flags
 
@@ -193,116 +303,24 @@ class ReevaluatorFunction(torch.autograd.Function):
 
         if torch.is_tensor(outputs):
             all_outputs += [outputs]
-            return outputs
+            results = outputs
         else:
             all_outputs += outputs
             outputs, _, _ = extract_tensors(all_objects=outputs)
-            return tuple(outputs)
+            results = tuple(outputs)
+
+        # Register reevaluator and bookkeep output tensor_ids in tensor_cache
+        # Based on all usage in Megatron_Deepspeed, we may assume the variable `outputs` in both forward() and reevaluate_forward_func() is either a tensor or a tuple of tensors
+        get_tensor_cache().register_reevaluator(
+            ctx, reevaluate_forward_func, results
+        )
+
+        return results
 
     @staticmethod
     def backward(ctx, *grads):
-        see_memory_usage("In backward", force=False)
-        # removing pointers to the contiguous buffer memory
-        # so that they can be garbage collected once the checkpoints
-        # have been used
-        if checkpointing.SYNCHRONIZE:
-            get_accelerator().synchronize()
-        if checkpointing.PROFILE_TIME:
-            checkpointing.timers("backward").start()
-
-        if checkpointing.CONTIGUOUS_CHECKPOINTING:
-            # global data_offsets, size_offsets
-
-            for buffers in checkpointing.contiguous_data_buffers:
-                buffers = []
-
-            # frees up all the pointers to the checkpoints except for the ones
-            # stored by save for backward
-            checkpointing.contiguous_data_buffers = []
-            checkpointing.contiguous_size_buffers = []
-            checkpointing.data_offsets = []
-            checkpointing.size_offsets = []
-
-        see_memory_usage("In backward checkpointing code", force=False)
-        if not torch.autograd._is_checkpoint_valid():
-            raise RuntimeError(
-                "Checkpointing is not compatible with .grad(), "
-                "please use .backward() if possible"
-            )
-
-        # global transport_stream
-
-        # Rebuild deepspeed_saved_tensors
-        for t in ctx.deepspeed_saved_tensors:
-            if (
-                t is not None
-                and hasattr(t, "saved_data")
-                and t.saved_data is not None
-            ):
-                t.data = t.saved_data.to(t.device)
-                t.saved_data = None
-
-        if checkpointing.PARTITION_ACTIVATIONS:
-            # with get_accelerator().stream(transport_stream):
-            inputs = gather_partitioned_activations(
-                ctx.deepspeed_saved_tensors,
-                device=checkpointing.cuda_device
-                if checkpointing.CPU_CHECKPOINT
-                else None,
-            )
-            detached_inputs = detach_variable(inputs)
-        elif checkpointing.CPU_CHECKPOINT:
-            inputs = move_to_device(
-                ctx.deepspeed_saved_tensors,
-                checkpointing.cuda_device,
-                is_activation_to_checkpoint,
-            )
-            detached_inputs = detach_variable(inputs)
-        else:
-            inputs = ctx.deepspeed_saved_tensors
-            detached_inputs = detach_variable(inputs)
-
-        # Add non tensor input args
-        detached_inputs = merge_tensors(
-            tensor_objects=detached_inputs,
-            non_tensor_objects=ctx.non_tensor_args,
-            tensor_flags=ctx.tensor_flags,
-        )
-
-        # Store the current states.
-        bwd_cpu_rng_state = torch.get_rng_state()
-        bwd_cuda_rng_state = get_accelerator().get_rng_state()
-        bwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
-
-        # Set the states to what it used to be before the forward pass.
-        torch.set_rng_state(ctx.fwd_cpu_rng_state)
-        _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
-        get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
-
-        # if checkpointing.PARTITION_ACTIVATIONS:
-        #     current_stream=get_accelerator().current_stream()
-        #     current_stream.wait_stream(transport_stream)
-
-        see_memory_usage(
-            "In backward checkpointing code before forward", force=False
-        )
-
-        with torch.enable_grad():
-            outputs = ctx.run_function(*detached_inputs)
-
-        see_memory_usage(
-            "In backward checkpointing code after forward", force=False
-        )
-        # Set the states back to what it was at the start of this function.
-        torch.set_rng_state(bwd_cpu_rng_state)
-        _set_cuda_rng_state(bwd_cuda_rng_state)
-        get_cuda_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
-
-        if isinstance(outputs, torch.Tensor):
-            outputs = (outputs,)
-
-        # Filter out non tensor outputs
-        outputs, _, _ = extract_tensors(all_objects=outputs)
+        # Get outputs from the tensor_cache
+        outputs = get_tensor_cache().get_reevaluated_output()
 
         # Construct arguments to autograd.backward().
         # This is usually just outputs and grads, but forward() can return tensors that
@@ -319,9 +337,11 @@ class ReevaluatorFunction(torch.autograd.Function):
         )
 
         torch.autograd.backward(output_tensors, grad_tensors)
+        # Delete the output_tensors stored in tensor_cache.reevaluated_ctx_outputs[ctx]
+        get_tensor_cache().del_reevaluated_output()
 
         # Force clear our stashed tensors to prevent a memory leak in certain scenarios
-        ctx.deepspeed_saved_tensors = None
+        deepspeed_saved_tensors = None
         ctx.non_tensor_args = None
         ctx.tensor_flags = None
 
@@ -344,11 +364,11 @@ class ReevaluatorFunction(torch.autograd.Function):
         return tuple(ret_list)
 
 
-def reevaluator(function, *args):
+def reevaluator(function, *args) -> torch.Tensor | tuple[torch.Tensor]:
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
 
-    all_outputs = []
+    all_outputs: list[torch.Tensor] = []
     ReevaluatorFunction.apply(function, all_outputs, *args)
     if len(all_outputs) == 1:
         return all_outputs[0]

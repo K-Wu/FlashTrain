@@ -60,6 +60,30 @@ def get_torch_activation_checkpoint_caller_filename_and_line() -> (
     )
 
 
+def is_reevaluator_in_traceback():
+    # The traceback will have something like flashtrain/tensor_cache/reevaluator/megatron_deepspeed.py", line 136, in reevaluator
+    trace_stack = [line.strip() for line in traceback.format_stack()][:-1]
+    return any(
+        [
+            os.path.join(
+                "flashtrain",
+                "tensor_cache",
+                "reevaluator",
+                "megatron_deepspeed.py",
+            )
+            in line
+            for line in trace_stack
+        ]
+        + [
+            os.path.join(
+                "flashtrain", "tensor_cache", "reevaluator", "deepspeed.py"
+            )
+            in line
+            for line in trace_stack
+        ]
+    )
+
+
 def is_torch_activation_checkpoint_in_traceback():
     # The traceback will have something like torch/utils/checkpoint.py", line 1410, in _checkpoint_without_reentrant_generator
     trace_stack = [line.strip() for line in traceback.format_stack()][:-1]
@@ -120,6 +144,7 @@ class TensorCache:
     # Only reentered module is recorded in module_id_to_reenter_count
     module_id_to_reenter_count: dict[int, int]
     current_activation_context: ActivationContext | None
+    current_reevaluator_context: ActivationContext | None
     activation_checkpoints: list[ActivationContext]
     activation_checkpoint_to_module_id: dict[
         ActivationContext, set[ModuleReentrantContext]
@@ -127,7 +152,7 @@ class TensorCache:
     previous_module_to_activation_context: dict[
         ModuleReentrantContext | ActivationContext | None, ActivationContext
     ]
-    forward_module_scope_stack: list[
+    current_forward_module_scope_stack: list[
         ModuleReentrantContext | ActivationContext
     ]
     # The order of modules calling forward hook is the reverse of modules calling backward pre hook
@@ -161,11 +186,73 @@ class TensorCache:
     offloader: OffloadHost
 
     lock: threading.Lock
+    # Currently only one context is kept during reevaluation
+    # TODO: add support to multithreading
+    reevaluator_lock: threading.Lock
 
     parameters: set[TensorEqID]
 
     current_in_backward: bool
+    current_in_reevaluator: bool
     disable_pack_unpack_hook: bool
+
+    # module_to_reevaluate_data[module_id] = {"reevaluate_forward_func": Callable, "output_tensors_id_to_output_idx": "dict[TensorEqID,int], "ctx": torch.autograd.function._ContextMethodMixin,  "outputs": torch.Tensor|tuple[torch.Tensor]}
+    # tensor_to_reevaluate_ids[tensor_id] =  ActivationContext
+    module_to_reevaluate_data: dict[
+        ActivationContext,
+        dict[
+            str,
+            Callable
+            | dict[TensorEqID, int]
+            | torch.autograd.function._ContextMethodMixin
+            | torch.Tensor
+            | tuple[torch.Tensor],
+        ],
+    ]
+    tensor_to_reevaluate_ids: dict[TensorEqID, ActivationContext]
+
+    def register_reevaluator(
+        self,
+        ctx: torch.autograd.function._ContextMethodMixin,
+        reevaluate_forward_func: Callable[
+            [torch.autograd.function._ContextMethodMixin],
+            torch.Tensor | tuple[torch.Tensor],
+        ],
+        outputs: torch.Tensor | tuple[torch.Tensor],
+    ):
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
+        assert isinstance(
+            self.current_forward_module_scope_stack[-1], ActivationContext
+        )
+        self.module_to_reevaluate_data[
+            self.current_forward_module_scope_stack[-1]
+        ] = {
+            "reevaluate_forward_func": reevaluate_forward_func,
+            "output_tensors_id_to_output_idx": {
+                TensorEqID.from_tensor(output): idx
+                for idx, output in enumerate(outputs)
+            },
+            "ctx": ctx,
+        }
+        for output_tensor_id in self.module_to_reevaluate_data[
+            self.current_forward_module_scope_stack[-1]
+        ]["output_tensors_id_to_output_idx"].keys():
+            self.tensor_to_reevaluate_ids[
+                output_tensor_id
+            ] = self.current_forward_module_scope_stack[-1]
+
+    def get_reevaluated_output(self):
+        assert self.current_reevaluator_context is not None
+        return self.module_to_reevaluate_data[
+            self.current_reevaluator_context
+        ]["outputs"]
+
+    def del_reevaluated_output(self):
+        assert self.current_reevaluator_context is not None
+        del self.module_to_reevaluate_data[self.current_reevaluator_context][
+            "outputs"
+        ]
 
     def __init__(
         self,
@@ -204,19 +291,19 @@ class TensorCache:
         self.tensor_id_to_module_ids = {}
         self.module_id_to_reenter_count = {}
         self.current_activation_context = None
+        self.current_reevaluator_context = None
         self.activation_checkpoints = []
         self.activation_checkpoint_to_module_id = {}
         self.previous_module_to_activation_context = {}
-        self.forward_module_scope_stack = []
+        self.current_forward_module_scope_stack = []
         self.forward_done_modules = []
         self.forward_modules_whole_stack = []
         self.backward_done_modules = set()
         self.backward_done_modules_with_cache_to_clear = set()
         self.delayed_backward_done_modules_with_cache_to_clear = set()
 
-        # TODO: add tensor_id_to_reevaluator map
-
         self.current_in_backward = False
+        self.current_in_reevaluator = False
         self.offloading_disabled = False
 
         ##
@@ -233,7 +320,11 @@ class TensorCache:
         )
 
         self.lock = threading.Lock()
+        self.reevaluator_lock = threading.Lock()
         self.parameters_and_inputs = set()
+
+        self.module_to_reevaluate_data = {}
+        self.tensor_to_reevaluate_ids = {}
 
     def is_ignored_module(
         self, m: torch.nn.Module, ignored_module_names: set[str]
@@ -356,7 +447,7 @@ class TensorCache:
     def wait_forward(self):
         if self.enable_activation_context_recording:
             self._update_current_activation_context_in_forward()
-        self.forward_module_scope_stack.clear()
+        self.current_forward_module_scope_stack.clear()
         if self.saved_forward_done_modules is None:
             self.build_ignored_modules_and_last_modules()
         assert self.saved_forward_done_modules is not None
@@ -420,14 +511,15 @@ class TensorCache:
             logger.debug(
                 "Adding activation context"
                 f" {self.current_activation_context} into"
-                " forward_module_scope_stack"
+                " current_forward_module_scope_stack"
             )
             previous_module = None
-            if self.forward_module_scope_stack:
+            if self.current_forward_module_scope_stack:
                 assert not isinstance(
-                    self.forward_module_scope_stack[-1], ActivationContext
+                    self.current_forward_module_scope_stack[-1],
+                    ActivationContext,
                 )
-                previous_module = self.forward_module_scope_stack[-1]
+                previous_module = self.current_forward_module_scope_stack[-1]
             assert (
                 previous_module
                 not in self.previous_module_to_activation_context
@@ -435,7 +527,7 @@ class TensorCache:
             self.previous_module_to_activation_context[
                 previous_module
             ] = self.current_activation_context
-            self.forward_module_scope_stack.append(
+            self.current_forward_module_scope_stack.append(
                 self.current_activation_context
             )
         else:
@@ -444,13 +536,13 @@ class TensorCache:
                 # We exit an activation checkpoint region.
                 self.current_activation_context = None
                 self.forward_done_modules.append(
-                    self.forward_module_scope_stack[-1]
+                    self.current_forward_module_scope_stack[-1]
                 )
                 if self.saved_forward_done_modules is None:
                     self.forward_modules_whole_stack.append(
-                        self.forward_module_scope_stack.copy()
+                        self.current_forward_module_scope_stack.copy()
                     )
-                self.forward_module_scope_stack.pop()
+                self.current_forward_module_scope_stack.pop()
 
     def _check_done_activation_context_in_backward(
         self, backward_pre_hook_target: torch.nn.Module | None
@@ -541,7 +633,7 @@ class TensorCache:
         else:
             reenter_count = self.module_id_to_reenter_count.get(id(m), 1) - 1
 
-        # TODO: add support to multiple modules
+        # TODO: parameterize the function to check if the module is the x-th last modules
         return (
             ModuleReentrantContext(
                 module_id=id(m),
@@ -570,6 +662,10 @@ class TensorCache:
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
         def forward_pre_hook(m: torch.nn.Module, inputs) -> None:
+            if self.current_in_backward:
+                # The context is already maintained in self.current_reevaluator_context. No need to update contexts only available in forward propagation.
+                assert self.current_in_reevaluator
+                return
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
@@ -609,7 +705,7 @@ class TensorCache:
                 self.module_id_to_reenter_count.get(id(m), 0)
                 + 1
             )
-            self.forward_module_scope_stack.append(
+            self.current_forward_module_scope_stack.append(
                 ModuleReentrantContext(
                     module_id=id(m),
                     reenter_count=self.module_id_to_reenter_count[id(m)] - 1,
@@ -617,28 +713,34 @@ class TensorCache:
             )
 
             if (
-                self.forward_module_scope_stack[-1]
+                self.current_forward_module_scope_stack[-1]
                 not in self.module_id_to_tensor_ids
             ):
                 assert not isinstance(
-                    self.forward_module_scope_stack[-1], ActivationContext
+                    self.current_forward_module_scope_stack[-1],
+                    ActivationContext,
                 )
                 self.module_id_to_tensor_ids[
-                    self.forward_module_scope_stack[-1]
+                    self.current_forward_module_scope_stack[-1]
                 ] = set()
             # Update the data structures if in an activation checkpoint region.
             if self.current_activation_context:
                 assert not isinstance(
-                    self.forward_module_scope_stack[-1], ActivationContext
+                    self.current_forward_module_scope_stack[-1],
+                    ActivationContext,
                 )
                 self.activation_checkpoint_to_module_id[
                     self.current_activation_context
-                ].add(self.forward_module_scope_stack[-1])
+                ].add(self.current_forward_module_scope_stack[-1])
 
         return forward_pre_hook
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, inputs, outputs) -> None:
+            if self.current_in_backward:
+                assert self.current_in_reevaluator
+                # The context is already maintained in self.current_reevaluator_context. No need to update contexts only available in forward propagation.
+                return
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
@@ -660,17 +762,19 @@ class TensorCache:
             )
             # The runtime has finished the forward logic within module m.
             assert not isinstance(
-                self.forward_module_scope_stack[-1], ActivationContext
+                self.current_forward_module_scope_stack[-1], ActivationContext
             )
-            assert self.forward_module_scope_stack[-1].module_id == id(m)
+            assert self.current_forward_module_scope_stack[-1].module_id == id(
+                m
+            )
             self.forward_done_modules.append(
-                self.forward_module_scope_stack[-1]
+                self.current_forward_module_scope_stack[-1]
             )
             if self.saved_forward_done_modules is None:
                 self.forward_modules_whole_stack.append(
-                    self.forward_module_scope_stack.copy()
+                    self.current_forward_module_scope_stack.copy()
                 )
-            self.forward_module_scope_stack.pop()
+            self.current_forward_module_scope_stack.pop()
 
         return forward_hook
 
@@ -771,11 +875,13 @@ class TensorCache:
             # Skipping the pack hook in the backward propagation to avoid issue in activation recomputation.
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
-                    logger.debug(
-                        "Tensor cache skips packing in backward propagation"
-                        f" {tensor_id}"
-                    )
-                    return tensor
+                    if not self.current_in_reevaluator:
+                        logger.debug(
+                            "Tensor cache skips packing in backward"
+                            f" propagation {tensor_id}"
+                        )
+                        return tensor
+                    # If self.current_in_backward and self.current_in_reevaluator, neither return nor update current activation context. Pack the tensor but keep it in memory.
                 else:
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
@@ -792,7 +898,7 @@ class TensorCache:
 
                 if self.offloading_disabled or (
                     self.saved_ignored_last_modules is not None
-                    and self.forward_module_scope_stack[-1]
+                    and self.current_forward_module_scope_stack[-1]
                     in self.saved_ignored_last_modules
                 ):
                     if self.saved_ignored_last_modules is not None:
@@ -801,7 +907,7 @@ class TensorCache:
                                 "OFFLOADING DISABLED!!!",
                                 self.offloading_disabled,
                                 self.saved_ignored_last_modules,
-                                self.forward_module_scope_stack[-1],
+                                self.current_forward_module_scope_stack[-1],
                             )
                         )
                     # No need to store. Continue to the next step to register it into the other data structures.
@@ -814,6 +920,31 @@ class TensorCache:
                         f" {tensor_id}, size {math.prod(tensor.size())}."
                     )
                     self.offloader.add_loaded_tensor(tensor_id, tensor)
+                elif self.current_in_reevaluator:
+                    logger.info(
+                        f"Keeping {tensor_id} in memory, size"
+                        f" {math.prod(tensor.size())}"
+                    )
+                    with self.lock:
+                        self.offloader.add_loaded_tensor(tensor_id, tensor)
+                        # Bookkeep self.tensor_id_to_module_ids[tensor_id] and self.module_id_to_tensor_ids[tensor_id]
+                        if tensor_id not in self.tensor_id_to_module_ids:
+                            self.tensor_id_to_module_ids[tensor_id] = set()
+                        assert self.current_reevaluator_context is not None
+                        self.tensor_id_to_module_ids[tensor_id].add(
+                            self.current_reevaluator_context
+                        )
+                        if (
+                            self.current_reevaluator_context
+                            not in self.module_id_to_tensor_ids
+                        ):
+                            self.module_id_to_tensor_ids[
+                                self.current_reevaluator_context
+                            ] = set()
+                        self.module_id_to_tensor_ids[
+                            self.current_reevaluator_context
+                        ].add(tensor_id)
+
                 else:
                     logger.info(
                         f"Packing {tensor_id}, size {math.prod(tensor.size())}"
@@ -828,14 +959,14 @@ class TensorCache:
                 if tensor_id not in self.tensor_id_to_module_ids:
                     self.tensor_id_to_module_ids[tensor_id] = set()
                 self.tensor_id_to_module_ids[tensor_id].add(
-                    self.forward_module_scope_stack[-1]
+                    self.current_forward_module_scope_stack[-1]
                 )
                 logger.debug(
                     f"Recording tensor {tensor_id} in module"
-                    f" {self.forward_module_scope_stack[-1]}"
+                    f" {self.current_forward_module_scope_stack[-1]}"
                 )
                 self.module_id_to_tensor_ids[
-                    self.forward_module_scope_stack[-1]
+                    self.current_forward_module_scope_stack[-1]
                 ].add(tensor_id)
                 return tensor_id
 
@@ -872,14 +1003,53 @@ class TensorCache:
             else:
                 # The argument is TensorEqID
                 logger.debug(f"Unpacking {tensor_id_or_tensor}")
+                # The tensor should be obtained by reevaluation
+                if tensor_id_or_tensor in self.tensor_to_reevaluate_ids:
+                    # If it is not stored in the output, do reevaluation
+                    reevaluate_id: ActivationContext = (
+                        self.tensor_to_reevaluate_ids[tensor_id_or_tensor]
+                    )
+                    if (
+                        "outputs"
+                        not in self.module_to_reevaluate_data[reevaluate_id]
+                    ):
+                        self.do_reevaluation(reevaluate_id)
+                    return self.module_to_reevaluate_data[reevaluate_id][
+                        "outputs"
+                    ][
+                        self.module_to_reevaluate_data[reevaluate_id][
+                            "output_tensors_id_to_output_idx"
+                        ][tensor_id]
+                    ]
                 return self.offloader.get_loaded_tensor(tensor_id_or_tensor)
 
         return unpack_hook
+
+    def do_reevaluation(self, activation_context: ActivationContext):
+        """
+        1) set self.current_in_reevaluator and self.current_reevaluator_context.
+        2) perform reevaluation bookkeep the reevaluation results in self.module_to_reevaluate_data[module_id]["outputs"].
+        3) unset self.current_in_reevaluator and self.current_reevaluator_context.
+        """
+        with self.reevaluator_lock:
+            self.current_in_reevaluator = True
+            self.current_reevaluator_context = activation_context
+            self.module_to_reevaluate_data[activation_context][
+                "outputs"
+            ] = self.module_to_reevaluate_data[activation_context][
+                "reevaluate_forward_func"
+            ](
+                self.module_to_reevaluate_data[activation_context]["ctx"]
+            )
+            self.current_in_reevaluator = False
+            self.current_reevaluator_context = None
 
     def prefetch_saved_tensors(
         self, module_id: ModuleReentrantContext | ActivationContext
     ) -> None:
         tensor_ids = self.module_id_to_tensor_ids[module_id]
+        # TODO: support async reevaluation: call self.module_to_reevaluate_data[module_id]["reevaluate_forward_func"] if tensor_id in self.tensor_to_reevaluate_ids.
+        # TODO: And then store mapping between tensor_ids in self.module_to_reevaluate_data[module_id]["output_tensors_id_to_output_idx"] to the future of the async reevaluation in self.tensor_id_being_reevaluated.
         self.offloader.prefetch_saved_tensors(tensor_ids)
         return
 
@@ -892,7 +1062,18 @@ class TensorCache:
         # We need to ensure thread-safety during the backward pass.
         with self.lock:
             for module_id in self.backward_done_modules_with_cache_to_clear:
-                for tensor_id in self.module_id_to_tensor_ids[module_id]:
+                # Work on self.module_to_reevaluate_data[module_id]["output_tensors_id_to_output_idx"] when applicable
+                tensor_ids = self.module_id_to_tensor_ids[module_id]
+                if (
+                    isinstance(module_id, ActivationContext)
+                    and module_id in self.module_to_reevaluate_data
+                ):
+                    tensor_ids = tensor_ids.union(
+                        self.module_to_reevaluate_data[module_id][
+                            "output_tensors_id_to_output_idx"
+                        ].keys()
+                    )
+                for tensor_id in tensor_ids:
                     logger.error(
                         f"Removing tensor from tensor cache {tensor_id} for"
                         f" module {module_id}. Modules to clear"
@@ -912,6 +1093,19 @@ class TensorCache:
                         )
                         tensor_ids_to_clean_up.add(tensor_id)
 
+                    # Delete self.tensor_to_reevaluate_ids[tensor_id] when applicable
+                    del_dict_key_if_exists(
+                        self.tensor_to_reevaluate_ids,
+                        tensor_id,
+                        None,
+                    )
+
                 del self.module_id_to_tensor_ids[module_id]
+                # Delete self.module_to_reevaluate_data[module_id] when applicable
+                del_dict_key_if_exists(
+                    self.module_to_reevaluate_data,
+                    module_id,
+                    None,
+                )
             self.offloader.clean_up_in_backward(tensor_ids_to_clean_up)
             self.backward_done_modules_with_cache_to_clear.clear()

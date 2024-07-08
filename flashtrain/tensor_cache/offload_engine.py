@@ -395,8 +395,6 @@ class OffloadHost:
             self.engine = ThreadedOffloadEngine(
                 adapter, max_workers, logger.getEffectiveLevel()
             )
-        # Wait for command line input
-        # var = input("Please enter something: ")
 
     def add_loaded_tensor(
         self, tensor_id: TensorEqID, tensor: torch.Tensor
