@@ -320,7 +320,9 @@ class ReevaluatorFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grads):
         # Get outputs from the tensor_cache
-        outputs = get_tensor_cache().get_reevaluated_output()
+        outputs = get_tensor_cache().get_reevaluated_output(
+            ctx.reevaluator_context
+        )
 
         # Construct arguments to autograd.backward().
         # This is usually just outputs and grads, but forward() can return tensors that
@@ -338,7 +340,7 @@ class ReevaluatorFunction(torch.autograd.Function):
 
         torch.autograd.backward(output_tensors, grad_tensors)
         # Delete the output_tensors stored in tensor_cache.reevaluated_ctx_outputs[ctx]
-        get_tensor_cache().del_reevaluated_output()
+        get_tensor_cache().del_reevaluated_output(ctx.reevaluator_context)
 
         # Force clear our stashed tensors to prevent a memory leak in certain scenarios
         deepspeed_saved_tensors = None

@@ -138,10 +138,12 @@ class ReevaluatorFunction(torch.autograd.Function):
         inputs = ctx.saved_tensors
         detached_inputs = detach_variable(inputs)
         # Get outputs from the tensor_cache
-        outputs = get_tensor_cache().get_reevaluated_output()
+        outputs = get_tensor_cache().get_reevaluated_output(
+            ctx.reevaluator_context
+        )
         torch.autograd.backward(outputs, args)
         # Delete the output_tensors stored in tensor_cache.reevaluated_ctx_outputs[ctx]
-        get_tensor_cache().del_reevaluated_output()
+        get_tensor_cache().del_reevaluated_output(ctx.reevaluator_context)
 
         grads = tuple(
             inp.grad if isinstance(inp, torch.Tensor) else inp

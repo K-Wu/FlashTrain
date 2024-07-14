@@ -8,6 +8,7 @@ from torch.testing._internal.common_utils import (
     parametrize,
     instantiate_parametrized_tests,
 )
+from ..tensor_cache.utils import TensorEqID
 from ..tensor_cache import tensor_cache as TC
 from ..tensor_cache import pipeline_tensor_cache as PTC
 from ..tensor_cache.pipeline_tensor_cache import Stage
@@ -24,6 +25,27 @@ from ..utils import (
     register_transpose_of_linear_weights,
 )
 from typing import Any
+from megatron.core import tensor_parallel
+from ..tensor_cache.reevaluator.megatron_deepspeed import (
+    reevaluator as megatron_reevaluator,
+)
+from ..tensor_cache import set_tensor_cache
+from enum import Enum
+from functools import total_ordering
+
+
+@total_ordering
+class CheckpointMethod(Enum):
+    NONE = 0
+    TORCH = 1
+    MEGATRON_DEEPSPEED = 2
+    MEGATRON_DEEPSPEED_REEVALUATOR = 3
+    MEGATRON_DEEPSPEED_REEVALUATOR_WHOLLY = 4
+
+    def __lt__(self, other):
+        if self.__class__ is other.__class__:
+            return self.value < other.value
+        return NotImplemented
 
 
 class SimpleModel(nn.Module):
@@ -53,7 +75,16 @@ class SimpleModelTestWithCache(TestCase):
                 self.assertTrue(n_p1[0] in n_p2[0])
             self.assertTrue(torch.allclose(p1, p2), f"{p1} vs {p2}")
 
-    @parametrize("use_checkpoint", [True, False])
+    @parametrize(
+        "use_checkpoint",
+        [
+            CheckpointMethod.NONE,
+            CheckpointMethod.TORCH,
+            CheckpointMethod.MEGATRON_DEEPSPEED,
+            CheckpointMethod.MEGATRON_DEEPSPEED_REEVALUATOR,
+            CheckpointMethod.MEGATRON_DEEPSPEED_REEVALUATOR_WHOLLY,
+        ],
+    )
     @parametrize("enable_microbatch", [True, False])
     @parametrize(
         "adapter_type", ["native", "main_memory", "kvikio", "revolver"]
@@ -62,7 +93,7 @@ class SimpleModelTestWithCache(TestCase):
         self,
         use_recursive_do=True,
         debug_viz=False,
-        use_checkpoint=True,
+        use_checkpoint=CheckpointMethod.TORCH,
         enable_microbatch=False,
         adapter_type="kvikio",
     ) -> None:
@@ -79,17 +110,20 @@ class SimpleModelTestWithCache(TestCase):
         tensor_cache_args: dict[str, Any]
         if adapter_type == "main_memory":
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint,
+                "enable_activation_context_recording": use_checkpoint
+                != CheckpointMethod.NONE,
                 "adapter": adapters.TorchMainMemoryIOAdapter(),
             }
         elif adapter_type == "kvikio":
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint,
+                "enable_activation_context_recording": use_checkpoint
+                != CheckpointMethod.NONE,
                 "adapter": adapters.KvikioIOAdapter(),
             }
         elif adapter_type == "revolver":
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint,
+                "enable_activation_context_recording": use_checkpoint
+                != CheckpointMethod.NONE,
                 "adapter": adapters.RevolverIOAdapter(
                     [
                         adapters.TorchBuiltinIOAdapter(),
@@ -100,9 +134,10 @@ class SimpleModelTestWithCache(TestCase):
         else:
             assert adapter_type == "native"
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint,
+                "enable_activation_context_recording": use_checkpoint
+                != CheckpointMethod.NONE,
             }
-
+        tensor_cache_args["skip_small_tensors"] = False
         if enable_microbatch:
             tensor_cache_args["num_microbatches"] = 2
             tensor_cache = PTC.PipelineTensorCache(**tensor_cache_args)
@@ -110,6 +145,8 @@ class SimpleModelTestWithCache(TestCase):
         else:
             tensor_cache = TC.TensorCache(**tensor_cache_args)
             tensor_caches = [tensor_cache]
+        set_tensor_cache(tensor_cache)
+
         tensor_cache.add_parameters_from_module(model_withcache)
         if use_recursive_do:
             for tc_ in tensor_caches:
@@ -218,11 +255,42 @@ class SimpleModelTestWithCache(TestCase):
                 # TC.dummy_hooks.dummy_pack_hook,
                 # TC.dummy_hooks.dummy_unpack_hook,
             ):
-                if use_checkpoint:
+                if use_checkpoint != CheckpointMethod.NONE:
                     # Adapted from https://github.com/prigoyal/pytorch_memonger/blob/master/tutorial/Checkpointing_for_PyTorch_models.ipynb
-                    output_withcache = checkpoint.checkpoint(
-                        model_withcache, input, use_reentrant=True
-                    )
+                    if use_checkpoint == CheckpointMethod.TORCH:
+                        output_withcache = checkpoint.checkpoint(
+                            model_withcache, input, use_reentrant=True
+                        )
+                    elif use_checkpoint == CheckpointMethod.MEGATRON_DEEPSPEED:
+                        output_withcache = tensor_parallel.checkpoint(
+                            model_withcache, False, input
+                        )
+                    elif (
+                        use_checkpoint
+                        == CheckpointMethod.MEGATRON_DEEPSPEED_REEVALUATOR_WHOLLY
+                    ):
+                        output_withcache = megatron_reevaluator(
+                            model_withcache, False, input
+                        )
+                    else:
+                        assert (
+                            use_checkpoint
+                            == CheckpointMethod.MEGATRON_DEEPSPEED_REEVALUATOR
+                        )
+                        output_withcache = megatron_reevaluator(
+                            lambda x: model_withcache.relu(
+                                model_withcache.net1(x)
+                            ),
+                            False,
+                            input,
+                        )
+                        output_withcache = model_withcache.relu(
+                            model_withcache.net2(output_withcache)
+                        )
+                        output_withcache = model_withcache.relu(
+                            model_withcache.net3(output_withcache)
+                        )
+
                 else:
                     output_withcache = model_withcache(input_withcache)
 
@@ -255,11 +323,44 @@ class SimpleModelTestWithCache(TestCase):
                         next_stage=Stage.BACKWARD,
                     )
                     input = torch.rand(4, 5).cuda()
-                    if use_checkpoint and i % 2 == 0:
+                    if use_checkpoint != CheckpointMethod.NONE and i % 2 == 0:
                         # Test accumulation of pass with checkpointing and without.
-                        output_withcache = checkpoint.checkpoint(
-                            model_withcache, input, use_reentrant=False
-                        )
+                        if use_checkpoint == CheckpointMethod.TORCH:
+                            output_withcache = checkpoint.checkpoint(
+                                model_withcache, input, use_reentrant=False
+                            )
+                        elif (
+                            use_checkpoint
+                            == CheckpointMethod.MEGATRON_DEEPSPEED
+                        ):
+                            output_withcache = tensor_parallel.checkpoint(
+                                model_withcache, False, input
+                            )
+                        elif (
+                            use_checkpoint
+                            == CheckpointMethod.MEGATRON_DEEPSPEED_REEVALUATOR_WHOLLY
+                        ):
+                            output_withcache = megatron_reevaluator(
+                                model_withcache, False, input
+                            )
+                        else:
+                            assert (
+                                use_checkpoint
+                                == CheckpointMethod.MEGATRON_DEEPSPEED_REEVALUATOR
+                            )
+                            output_withcache = megatron_reevaluator(
+                                lambda x: model_withcache.relu(
+                                    model_withcache.net1(x)
+                                ),
+                                False,
+                                input,
+                            )
+                            output_withcache = model_withcache.relu(
+                                model_withcache.net2(output_withcache)
+                            )
+                            output_withcache = model_withcache.relu(
+                                model_withcache.net3(output_withcache)
+                            )
                     else:
                         output_withcache = model_withcache(input)
                     loss_withcache = output_withcache.sum()

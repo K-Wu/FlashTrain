@@ -95,14 +95,14 @@ class TensorEqID:  # (dataobject):
         with cm:
             if use_timestamp_as_data_ptr:
                 if assert_get:
-                    assert hasattr(tensor, "timestamp")
-                    data_ptr = tensor.timestamp
+                    assert hasattr(tensor.untyped_storage(), "timestamp")
+                    data_ptr = tensor.untyped_storage().timestamp
                 else:
-                    if hasattr(tensor, "timestamp"):
-                        data_ptr = tensor.timestamp
+                    if hasattr(tensor.untyped_storage(), "timestamp"):
+                        data_ptr = tensor.untyped_storage().timestamp
                     else:
-                        tensor.timestamp = time.time()
-                        data_ptr = tensor.timestamp
+                        tensor.untyped_storage().timestamp = time.time()
+                        data_ptr = tensor.untyped_storage().timestamp
             else:
                 data_ptr = id(tensor.data)
         if isinstance(tensor.stride, int):
