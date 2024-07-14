@@ -132,10 +132,11 @@ BERT_ARGS="
     --fp16
 "
 
-if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
-BERT_ARGS="${BERT_ARGS} \
-    --checkpoint-activations"
-fi
+# Do not use --checkpoint-activations in any case. It is superceded by --deepspeed-activation-checkpointing and --recompute-granularity
+# if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+# BERT_ARGS="${BERT_ARGS} \
+#     --checkpoint-activations"
+# fi
 
 if [ "${LTD_ENABLED}" = "true" ]; then
 BERT_ARGS="${BERT_ARGS} \

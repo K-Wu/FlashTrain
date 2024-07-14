@@ -137,10 +137,10 @@ ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
 if [ "${activation_checkpoint}" = "true" ]; then
   ds_args="--deepspeed-activation-checkpointing ${ds_args}"
 
-  ## old argument for recomputing the transformer layer
+  ## Don't use the following old argument for recomputing the transformer layer!
   # ds_args="--checkpoint-activations ${ds_args}"
 
-  ## new argument for recomputing the transformer layer
+  ## Use instead the new argument for recomputing the transformer layer
   ## KWU: Support to Megatron's new checkpointing mechanism is added in https://github.com/microsoft/Megatron-DeepSpeed/pull/243
   ds_args="--recompute-granularity full --recompute-method uniform ${ds_args}"
   ## new argument for recomputing only the attention layer
