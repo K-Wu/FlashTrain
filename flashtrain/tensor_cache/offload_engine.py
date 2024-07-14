@@ -402,6 +402,15 @@ class OffloadHost:
         self.tensor_id_to_loaded_tensor[tensor_id] = tensor
 
     def get_loaded_tensor(self, tensor_id: TensorEqID) -> torch.Tensor:
+        with self.lock:
+            if tensor_id in self.tensor_id_to_tensor_to_store:
+                # The tensor is still in memory and being stored. Return the tensor directly.
+                tensor = self.tensor_id_to_tensor_to_store[tensor_id]()
+                if not tensor is None:
+                    if not tensor_id in self.tensor_id_to_loaded_tensor:
+                        self.tensor_id_to_loaded_tensor[tensor_id] = tensor
+                    return tensor
+
         if not tensor_id in self.tensor_id_to_loaded_tensor:
             # TODO: avoid load twice
             result_tensor = self.engine.get_loaded_tensor(tensor_id)

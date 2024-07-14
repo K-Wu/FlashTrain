@@ -66,7 +66,13 @@ class AdapterBase(metaclass=ABCMeta):
         self.save_tensor(tensor, path, event)
         logger.debug(f"Async wrapper saved tensor {tensor_id}")
         with thread_lock:
-            del tensor_being_stored[tensor_id]
+            if tensor_id in tensor_being_stored:
+                del tensor_being_stored[tensor_id]
+            else:
+                # If not, it means the entry is already deleted from tensor_being_stored to signify the tensor is used in backward propagation before the storing is completed
+                self.clean_up_in_backward(
+                    path, tensor.shape, tensor.dtype, tensor.device
+                )
 
     @abstractmethod
     def load_tensor(
@@ -403,16 +409,11 @@ class TorchMainMemoryIOAdapter(AdapterBase):
                             tensor.shape, tensor.dtype
                         )
                     )
-                self.cpu_tensor_cache[
-                    (path, tensor.shape, tensor.dtype, tensor.device)
-                ] = new_tensor
 
                 store_stream.wait_event(event)
 
                 with torch.cuda.stream(store_stream):
-                    self.cpu_tensor_cache[
-                        (path, tensor.shape, tensor.dtype, tensor.device)
-                    ].copy_(tensor, non_blocking=True)
+                    new_tensor.copy_(tensor, non_blocking=True)
             else:
                 # Wait until the computation finishes before saving the tensor
                 store_stream.wait_event(event)
@@ -422,16 +423,18 @@ class TorchMainMemoryIOAdapter(AdapterBase):
                 with torch.cuda.stream(store_stream):
                     # By default, the destination tensor will be in pinned memory: The logic to determine if the memory should be pinned is "pin_out = (non_blocking && self.is_cuda() && options.device().is_cpu() && (options.layout() == c10::kStrided))"
                     # This is because cudaMemcpyAsync requires the destination memory to be pinned memory. Source: https://forums.developer.nvidia.com/t/cudamemcpyasync-device-to-host-need-to-synchronize-before-using-data-on-host/51750/6
-                    self.cpu_tensor_cache[
-                        (path, tensor.shape, tensor.dtype, tensor.device)
-                    ] = tensor.to("cpu", non_blocking=True)
+                    new_tensor = tensor.to("cpu", non_blocking=True)
 
             # Block until the transfer finishes
             event = torch.cuda.Event()
             event.record(store_stream)
             event.synchronize()
 
-            logger.debug(
+            self.cpu_tensor_cache[
+                (path, tensor.shape, tensor.dtype, tensor.device)
+            ] = new_tensor
+
+            logger.error(
                 f"Main Memory Saved tensor {TensorEqID.from_tensor(tensor)} to"
                 f" {(path, tensor.shape, tensor.dtype, tensor.device)}"
             )
@@ -480,6 +483,10 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         dtype: torch.dtype,
         device: torch.device,
     ):
+        if not (path, shape, dtype, device) in self.cpu_tensor_cache:
+            # Avoid error when simultaneously clean up tensors and storing the tensor being cleaned up
+            # TODO: add a clean up all in the end of the backward propagation
+            return
         if self.use_host_pinned_memory_allocator and isinstance(
             self.host_pinned_memory_allocator, HostPinnedMemoryAllocator
         ):
@@ -594,7 +601,13 @@ class RevolverIOAdapter(AdapterBase):
     ):
         self.save_tensor(tensor, path, event)
         with thread_lock:
-            del tensor_being_stored[tensor_id]
+            if tensor_id in tensor_being_stored:
+                del tensor_being_stored[tensor_id]
+            else:
+                # If not, it means the entry is already deleted from tensor_being_stored to signify the tensor is used in backward propagation before the storing is completed
+                self.clean_up_in_backward(
+                    path, tensor.shape, tensor.dtype, tensor.device
+                )
 
     def load_tensor(
         self,
