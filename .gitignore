@@ -40,3 +40,4 @@ today_job.sh
 *.pt
 
 *.nsys-rep
+*.pickle
