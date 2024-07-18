@@ -41,6 +41,17 @@ def register_forward_hook_recursively(main: torch.nn.Module, hook: Callable):
     do_function_recursively(main, register_hook)
 
 
+def calculate_model_weight_size(main: torch.nn.Module):
+    """
+    Recursively calculate the size of the weights of a module and its submodules.
+    Use post-order traversal.
+    """
+    total_size = 0
+    for p in main.parameters():
+        total_size += p.numel() * p.element_size()
+    return total_size
+
+
 def register_full_backward_pre_hook_recursively(
     main: torch.nn.Module, hook: Callable
 ):
