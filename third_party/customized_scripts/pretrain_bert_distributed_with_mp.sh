@@ -17,9 +17,6 @@ BASE_PATH=./tmp
 # Create the directory in order to save the deepspeed.json file
 mkdir -p $BASE_PATH
 DS_CONFIG=${BASE_PATH}/deepspeed.json
-GLOBAL_BATCH_SIZE=16
-MICRO_BATCH_SIZE=2
-ZERO_STAGE=0
 
 
 ## In addition, we find that the 3.9B model (even after tuning INIT_STD) has
@@ -38,12 +35,9 @@ ZERO_STAGE=0
 
 ## BERT 336M (same config as original BERT-Large model)
 #NUM_LAYERS=24
-NUM_LAYERS=2
 # HIDDEN_SIZE=1024
-HIDDEN_SIZE=5120
 #NUM_ATTN_HEADS=16
-NUM_ATTN_HEADS=80
-INIT_STD=0.02
+# INIT_STD=0.02
 
 ## BERT 1.3B
 # NUM_LAYERS=24
@@ -57,10 +51,21 @@ INIT_STD=0.02
 # NUM_ATTN_HEADS=40
 # INIT_STD=0.011
 
+## My custom BERT
+NUM_LAYERS=3
+HIDDEN_SIZE=8192
+NUM_ATTN_HEADS=32
+INIT_STD=0.02
+
+
+GLOBAL_BATCH_SIZE=32
+MICRO_BATCH_SIZE=32
+ZERO_STAGE=0
 
 ## Activation checkpointing saves GPU memory, but reduces training speed
 # ACTIVATION_CHECKPOINT="true"
-ACTIVATION_CHECKPOINT="false"
+ACTIVATION_CHECKPOINT="true"
+USE_TENSOR_CACHE="false"
 
 LTD_ENABLED="false"
 
@@ -82,15 +87,15 @@ cat <<EOT > $DS_CONFIG
 }
 EOT
 
-ds_args=" --deepspeed ${ds_args}"
-ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
-ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
+  ds_args=" --deepspeed ${ds_args}"
+  ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
+  ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
 
-if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
-  ds_args="--deepspeed-activation-checkpointing ${ds_args}"
+  if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+    ds_args="--deepspeed-activation-checkpointing ${ds_args}"
+  fi
 fi
-fi
-
+    
 
 CHECKPOINT_PATH=./tmp
 VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
@@ -103,14 +108,16 @@ DISTRIBUTED_ARGS="
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT
 "
- 
-#    --checkpoint-num-layers 1 \
-#    --recompute-granularity full \
-#    --recompute-method uniform \
+
+# --profile-memory-beginning \
+# --profile-first-iter \
 
 BERT_ARGS="
+    --use-pure-low-precision \
+    --profile-memory-beginning \
     --use-flash-attn-v2 \
-    --enable-tensor-cache \
+    --use-distributed-optimizer \
+    --no-bias-gelu-fusion \
     --bert-no-binary-head \
     --tensor-model-parallel-size 2 \
     --num-layers ${NUM_LAYERS} \
@@ -129,7 +136,8 @@ BERT_ARGS="
     --weight-decay 1e-2 \
     --lr-warmup-fraction .01 \
     --clip-grad 1.0 \
-    --fp16
+    --fp16 \
+    --fp16-lm-cross-entropy \
 "
 
 # Do not use --checkpoint-activations in any case. It is superceded by --deepspeed-activation-checkpointing and --recompute-granularity
@@ -137,6 +145,10 @@ BERT_ARGS="
 # BERT_ARGS="${BERT_ARGS} \
 #     --checkpoint-activations"
 # fi
+
+if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+  BERT_ARGS="${BERT_ARGS} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
+fi
 
 if [ "${LTD_ENABLED}" = "true" ]; then
 BERT_ARGS="${BERT_ARGS} \
@@ -146,6 +158,10 @@ BERT_ARGS="${BERT_ARGS} \
 fi
 
 
+if [ "${USE_TENSOR_CACHE}" = "true" ]; then
+  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-in-memory-adapter --tensor-cache-log-level CRITICAL"
+fi
+
 DATA_ARGS="
     --data-path $DATA_PATH \
     --vocab-file $VOCAB_FILE \
@@ -154,7 +170,7 @@ DATA_ARGS="
 "
 
 OUTPUT_ARGS="
-    --log-interval 10 \
+    --log-interval 1 \
     --save-interval 10000 \
     --eval-interval 10000 \
     --eval-iters 10
@@ -162,6 +178,7 @@ OUTPUT_ARGS="
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
+# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert_distributed --force-overwrite true  --trace=cuda --sample=cpu --cuda-memory-usage true \
 torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_bert.py \
     $BERT_ARGS \
     $DATA_ARGS \

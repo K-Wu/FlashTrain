@@ -10,7 +10,7 @@ DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 #    --hidden-size 1024 \
 
 
-#    --tensor-cache-log-level CRITICAL
+#    --tensor-cache-log-level CRITICAL \
 #    --profile-first-iter \
 
 
@@ -25,18 +25,21 @@ DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 
 
 
-BERT_ARGS="    
+BERT_ARGS="
+    --use-pure-low-precision \
+    --profile-memory-beginning \
     --tensor-cache-log-level ERROR \
     --enable-tensor-cache \
     --tensor-cache-in-memory-adapter \
+    --no-bias-gelu-fusion \
     --use-flash-attn-v2 \
     --bert-no-binary-head \
-    --num-layers 3 \
+    --num-layers 2 \
     --hidden-size 8192 \
-    --num-attention-heads 16 \
+    --num-attention-heads 32 \
     --seq-length 512 \
     --max-position-embeddings 512 \
-    --micro-batch-size 8 \
+    --micro-batch-size 16 \
     --global-batch-size 16 \
     --lr 0.0001 \
     --train-iters 1000 \
@@ -46,7 +49,8 @@ BERT_ARGS="
     --weight-decay 1e-2 \
     --lr-warmup-fraction .01 \
     --clip-grad 1.0 \
-    --fp16
+    --fp16 \
+    --fp16-lm-cross-entropy \
 "
 
 DATA_ARGS="
@@ -66,7 +70,7 @@ OUTPUT_ARGS="
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
 # According to https://forums.developer.nvidia.com/t/nsys-segfault-during-profile-pthread-create-when-connected-over-ssh-with-x11/187703/4
-# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert --force-overwrite true  --trace=cuda --sample=cpu \
+# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert --force-overwrite true  --trace=cuda --sample=cpu --cuda-memory-usage true \
 torchrun  "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_bert.py \
     $BERT_ARGS \
     $DATA_ARGS \
