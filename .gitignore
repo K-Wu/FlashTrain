@@ -41,3 +41,5 @@ today_job.sh
 
 *.nsys-rep
 *.pickle
+*.csv
+*.html
