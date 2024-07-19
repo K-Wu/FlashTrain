@@ -136,6 +136,7 @@ class SimpleModelTestWithCache(TestCase):
             tensor_cache_args = {
                 "enable_activation_context_recording": use_checkpoint
                 != CheckpointMethod.NONE,
+                "fine_grained_release_in_activation_context_backward": True,
             }
         tensor_cache_args["skip_small_tensors"] = False
         if enable_microbatch:

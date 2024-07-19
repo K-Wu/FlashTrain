@@ -128,6 +128,7 @@ class ModuleReentrantContext:
 
 # When micro-batches is employed, we can still use the TensorCache across micro-batches because we don't save parameters, which may change across micro-batches.
 class TensorCache:
+    fine_grained_release_in_activation_context_backward: bool
     enable_activation_context_recording: bool
     enable_prefetch: bool
     implicit_wait_and_set_in_backward: bool
@@ -218,6 +219,12 @@ class TensorCache:
     ]
     tensor_to_reevaluate_ids: dict[TensorEqID, ActivationContext]
 
+    ctx_to_activation_context: dict[
+        torch.autograd.function._ContextMethodMixin, ActivationContext
+    ]
+    current_backward_activation_context: ActivationContext | None
+    current_in_backward_activation_context: bool
+
     def register_reevaluator(
         self,
         ctx: torch.autograd.function._ContextMethodMixin,
@@ -269,6 +276,7 @@ class TensorCache:
         adapter: Optional[AdapterBase] = None,
         implicit_wait_and_set_in_backward: bool = False,
         skip_small_tensors: bool = True,
+        fine_grained_release_in_activation_context_backward: bool = False,
         # To skip the numerous intermediate tensors in activation layer in the MLP blocks,
         # add "ParallelMLP" to ignored_module_names. Most of them are temporary tensor and
         # added to the graph only because they are in a torch.jit.script function. They
@@ -297,6 +305,9 @@ class TensorCache:
             implicit_wait_and_set_in_backward
         )
         self.skip_small_tensors = skip_small_tensors
+        self.fine_grained_release_in_activation_context_backward = (
+            fine_grained_release_in_activation_context_backward
+        )
         self.ignored_module_names = ignored_module_names
         self.ignored_module_recursively_names = (
             ignored_module_recursively_names
@@ -342,6 +353,10 @@ class TensorCache:
 
         self.module_to_reevaluate_data = {}
         self.tensor_to_reevaluate_ids = {}
+
+        self.ctx_to_activation_context = {}
+        self.current_backward_activation_context = None
+        self.current_in_backward_activation_context = False
 
     def is_ignored_module(
         self, m: torch.nn.Module, ignored_module_names: set[str]
@@ -480,6 +495,47 @@ class TensorCache:
         logger.debug("Set current_in_backward flag to True")
         self.current_in_backward = True
 
+    def _get_autogradctx_in_activationcontext(self):
+        import inspect
+
+        stack = traceback.format_stack()
+        for idx in range(len(stack)):
+            line = stack[len(stack) - 1 - idx]
+            if (
+                os.path.join("torch", "utils", "checkpoint.py") in line
+                or os.path.join(
+                    "megatron", "core", "tensor_parallel", "random.py"
+                )
+                in line
+                or os.path.join(
+                    "flashtrain", "tensor_cache", "reevaluator", "deepspeed.py"
+                )
+                in line
+                or os.path.join(
+                    "flashtrain",
+                    "tensor_cache",
+                    "reevaluator",
+                    "megatron_deepspeed.py",
+                )
+                in line
+                or os.path.join(
+                    "deepspeed",
+                    "runtime",
+                    "activation_checkpointing",
+                    "checkpointing.py",
+                )
+                in line
+            ) and ("in forward" in line or "in backward" in line):
+                # The innermost frame inside these files are the one inside the Autograd Function.
+                idx_frame = idx
+
+        frame = inspect.currentframe()
+        for _ in range(idx_frame):
+            frame = frame.f_back
+        if (frame is None) or ("ctx" not in frame.f_locals):
+            raise ValueError("ctx not found in the frame locals.")
+        return frame.f_locals["ctx"]
+
     def _update_current_activation_context_in_forward(self):
         assert self.enable_activation_context_recording
         assert not self.current_in_backward
@@ -532,7 +588,11 @@ class TensorCache:
                 self.current_activation_context
             ] = set()
 
-            # TODO: if self.fine_grained_release_in_activation_context_backward, we need to bookkeep ctx to ActivationContext in self.ctx_to_activation_context
+            if self.fine_grained_release_in_activation_context_backward:
+                ctx = self._get_autogradctx_in_activationcontext()
+                self.ctx_to_activation_context[
+                    ctx
+                ] = self.current_activation_context
 
             # Bookkeep previous module
             previous_module = None
@@ -704,9 +764,14 @@ class TensorCache:
                         ):
                             # We just enter an activation checkpoint region in the backward pass. Update the current_in_backward_activation_context.
                             self.current_in_backward_activation_context = True
-                            # TODO: update self.current_backward_activation_context by getting ctx from traceback
-                            # TODO: Add the current_backward_activation_context to the current_forward_module_scope_stack
-                        raise NotImplementedError
+                            # Update self.current_backward_activation_context by getting ctx from traceback
+                            self.current_backward_activation_context = self.ctx_to_activation_context[
+                                self._get_autogradctx_in_activationcontext()
+                            ]
+                            # Add the current_backward_activation_context to the current_forward_module_scope_stack
+                            self.current_forward_module_scope_stack.append(
+                                self.current_backward_activation_context
+                            )
                     else:
                         logger.debug(
                             "Skipping forward pre hook, in the backward"
@@ -804,7 +869,7 @@ class TensorCache:
                         )
                         # If we are current in the reevaluator instead of a recomputed checkpoint region, the context is already maintained in self.current_reevaluator_context. No need to update contexts only available in forward propagation.
                         return
-                else:
+                else:  # not self.current_in_backward
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
 
@@ -838,6 +903,7 @@ class TensorCache:
                 f"Full backward pre hook for ({id(m)})"
                 f" {get_oneline_str(m._get_name())}"
             )
+
             if self.enable_activation_context_recording:
                 # If the previous module to an activation context is triggered, it means the activation context is done in the backward propagation pass.
                 activation_context = (
@@ -853,7 +919,7 @@ class TensorCache:
                         self.fine_grained_release_in_activation_context_backward
                         and (self.current_in_backward_activation_context)
                     ):
-                        # We exited an activation context in the backward pass.
+                        # We exited an activation context in the backward pass. Clear up the activation context and flag.
                         self.current_in_backward_activation_context = False
                         self.current_backward_activation_context = None
                         self.current_forward_module_scope_stack.clear()
@@ -892,38 +958,28 @@ class TensorCache:
                     del self.module_id_to_reenter_count[id(m)]
 
         def full_backward_hook(m, grad_input, grad_output) -> None:
-            if self.fine_grained_release_in_activation_context_backward and (
-                self.current_in_reevaluator
-                or self.current_in_backward_activation_context
-            ):
-                # TODO: A module inside an activation context/reevaluator context is done. Clear up all modules inside the activation context/reevaluator context.
-
-                # TODO: If this is the outermost module in the activation context context, i.e., the end of the context, clear up the activation context/reevaluator context and flag as well.
-
-                # If the activation context did not end up with an outermost backward hook, it will be detected and handled by the backward_pre_hook using previous_module map.
-                raise NotImplementedError
-            else:
-                if all_is_none(grad_input):
-                    logger.warning(
-                        "All grad_input is None for"
-                        f" {get_oneline_str(m._get_name())}. This may trigger"
-                        " pre-mature cache clean up! We delay the clean up of"
-                        " the cache to the beginning of the next forward"
-                        " pass."
-                    )
-                    # Delay the clean up of the cache to the beginning of the next forward pass.
-                    with self.lock:
-                        add_to_module_to_clear(
-                            self,
-                            m,
-                            self.delayed_backward_done_modules_with_cache_to_clear,
-                        )
-                    return
-                # We need to ensure thread-safety during the backward pass.
+            # A module is done. Clear up all stuff regarding this module, e.g., tensors inside this module, this module's mapping to these tensors.
+            if all_is_none(grad_input):
+                logger.warning(
+                    "All grad_input is None for"
+                    f" {get_oneline_str(m._get_name())}. This may trigger"
+                    " pre-mature cache clean up! We delay the clean up of"
+                    " the cache to the beginning of the next forward"
+                    " pass."
+                )
+                # Delay the clean up of the cache to the beginning of the next forward pass.
                 with self.lock:
                     add_to_module_to_clear(
-                        self, m, self.backward_done_modules_with_cache_to_clear
+                        self,
+                        m,
+                        self.delayed_backward_done_modules_with_cache_to_clear,
                     )
+                return
+            # We need to ensure thread-safety during the backward pass.
+            with self.lock:
+                add_to_module_to_clear(
+                    self, m, self.backward_done_modules_with_cache_to_clear
+                )
 
             logger.debug(
                 f"Full backward hook for ({id(m)})"
@@ -979,7 +1035,7 @@ class TensorCache:
                         current_scope = (
                             self.current_backward_activation_context
                         )
-                else:
+                else:  # not self.current_in_backward
                     # First, update the current ActivationContext
                     self._update_current_activation_context_in_forward()
                     current_scope = self.current_forward_module_scope_stack[-1]
@@ -1030,13 +1086,7 @@ class TensorCache:
                         f" {math.prod(tensor.size())}"
                     )
                     self.offloader.add_loaded_tensor(tensor_id, tensor)
-                    # Bookkeep self.tensor_id_to_module_ids[tensor_id] and self.module_id_to_tensor_ids[tensor_id]
-                    if tensor_id not in self.tensor_id_to_module_ids:
-                        self.tensor_id_to_module_ids[tensor_id] = set()
                     assert self.current_reevaluator_context is not None
-                    self.tensor_id_to_module_ids[tensor_id].add(
-                        self.current_reevaluator_context
-                    )
                     if (
                         self.current_reevaluator_context
                         not in self.module_id_to_tensor_ids
@@ -1044,9 +1094,6 @@ class TensorCache:
                         self.module_id_to_tensor_ids[
                             self.current_reevaluator_context
                         ] = set()
-                    self.module_id_to_tensor_ids[
-                        self.current_reevaluator_context
-                    ].add(tensor_id)
                 elif (
                     self.fine_grained_release_in_activation_context_backward
                     and (
@@ -1059,8 +1106,6 @@ class TensorCache:
                         f" {math.prod(tensor.size())}"
                     )
                     self.offloader.add_loaded_tensor(tensor_id, tensor)
-                    # TODO: Bookkeep the mapping between each module inside the activation context and the tensors. So that they are released when each module is done.
-                    raise NotImplementedError
                 else:
                     logger.info(
                         f"Packing {tensor_id}, size {math.prod(tensor.size())}"
@@ -1072,6 +1117,7 @@ class TensorCache:
                         tensor_id, tensor, get_process_descriptor()
                     )
 
+                # Bookkeep the mapping between each module inside the activation context and the tensors. So that they are released when each module is done.
                 if tensor_id not in self.tensor_id_to_module_ids:
                     self.tensor_id_to_module_ids[tensor_id] = set()
                 self.tensor_id_to_module_ids[tensor_id].add(current_scope)
