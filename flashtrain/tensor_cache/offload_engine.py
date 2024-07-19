@@ -192,6 +192,8 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                 if tensor_id not in self.tensor_id_to_loaded_tensor:
                     logger.error(
                         f"The tensor {tensor_id} is not loaded during removal!"
+                        " Possibly this tensor is only bookkept but not"
+                        " offloaded, i.e., it is kept in memory."
                     )
                 del_dict_key_if_exists(
                     self.tensor_id_to_loaded_tensor,
@@ -439,12 +441,16 @@ class OffloadHost:
         process_descriptor: str,
     ) -> None:
         if tensor_id not in self.tensor_id_to_tensor_to_store:
+            logger.error(f"Adding tensor {tensor_id} into tensor to store")
             logger.debug(f"Adding tensor {tensor_id} into tensor to store")
             self.engine.add_tensor_to_store(
                 tensor_id, tensor, process_descriptor
             )
             self.tensor_id_to_tensor_to_store[tensor_id] = weakref.ref(tensor)
         else:
+            logger.error(
+                f"Tensor {tensor_id} already exists in tensor to store"
+            )
             logger.debug(
                 f"Tensor {tensor_id} already exists in tensor to store"
             )

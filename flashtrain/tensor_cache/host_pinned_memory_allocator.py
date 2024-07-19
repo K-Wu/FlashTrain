@@ -45,13 +45,19 @@ class PeakMemoryTracker(MemoryAllocatorBase):
         self.current_memory = 0
         self.lock = threading.Lock()
 
-    def allocate_tensor(
-        self, size_tuple: Sequence[int], dtype: Optional[torch.dtype] = None
-    ) -> torch.Tensor:
+    def _track_allocate_tensor(
+        self, size_tuple: Sequence[int], dtype: Optional[torch.dtype]
+    ):
+        """Only maintains peak memory and current memory but does not actually allocate memory."""
         size = self._calc_size(size_tuple, dtype)
         self.current_memory += size
         if self.current_memory > self.peak_memory:
             self.peak_memory = self.current_memory
+
+    def allocate_tensor(
+        self, size_tuple: Sequence[int], dtype: Optional[torch.dtype] = None
+    ) -> torch.Tensor:
+        self._track_allocate_tensor(size_tuple, dtype)
         return torch.empty(size_tuple, dtype=dtype).pin_memory()
 
     def release_tensor(self, tensor: torch.Tensor):

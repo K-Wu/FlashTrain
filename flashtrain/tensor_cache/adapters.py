@@ -13,6 +13,7 @@ from .host_pinned_memory_allocator import (
     MemoryAllocatorBase,
     PeakMemoryTracker,
 )
+from typing import Optional
 
 
 def create_new_filename(
@@ -181,8 +182,9 @@ class TorchBuiltinIOAdapter(AdapterBase):
         store_stream.wait_event(event)
 
         # Transfer tensor to CPU first in a non-blocking manner. Otherwise, torch.save will do the transfer in the blocking manner
-        with torch.cuda.stream(store_stream):
-            tensor = tensor.to("cpu", non_blocking=True)
+        with torch.no_grad():
+            with torch.cuda.stream(store_stream):
+                tensor = tensor.to("cpu", non_blocking=True)
 
         # Block until the transfer finishes
         event = torch.cuda.Event()
@@ -219,8 +221,9 @@ class TorchBuiltinIOAdapter(AdapterBase):
             )
 
         # The loaded tensor is on CPU. We need to move it to the correct device in a non-blocking manner.
-        with torch.cuda.stream(load_stream):
-            tensor = tensor.to(device, non_blocking=True)
+        with torch.no_grad():
+            with torch.cuda.stream(load_stream):
+                tensor = tensor.to(device, non_blocking=True)
 
         event = torch.cuda.Event()
         event.record(load_stream)
@@ -371,12 +374,16 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         if self.use_host_pinned_memory_allocator:
             self.host_pinned_memory_allocator = PeakMemoryTracker(0)
 
-    def instantiate_host_pinned_memory_allocator(self):
+    def instantiate_host_pinned_memory_allocator(
+        self, memory_size: Optional[int] = None
+    ):
         assert self.use_host_pinned_memory_allocator
         assert isinstance(self.host_pinned_memory_allocator, PeakMemoryTracker)
         # logger.critical(get_oneline_str("Peak Memory", self.host_pinned_memory_allocator.peak_memory))
+        if memory_size is None:
+            memory_size = self.host_pinned_memory_allocator.peak_memory
         self.host_pinned_memory_allocator = HostPinnedMemoryAllocator(
-            self.host_pinned_memory_allocator.peak_memory
+            memory_size
         )
 
     def create_new_filename(
@@ -412,18 +419,20 @@ class TorchMainMemoryIOAdapter(AdapterBase):
 
                 store_stream.wait_event(event)
 
-                with torch.cuda.stream(store_stream):
-                    new_tensor.copy_(tensor, non_blocking=True)
+                with torch.no_grad():
+                    with torch.cuda.stream(store_stream):
+                        new_tensor.copy_(tensor, non_blocking=True)
             else:
                 # Wait until the computation finishes before saving the tensor
                 store_stream.wait_event(event)
 
                 # non_blocking copy uses cudaMemcpyAsync on current stream. ccording to /pytorch/aten/src/ATen/native/cuda/Copy.cu
                 # Current stream is stored in thread-local variable and therefore thread-safe.
-                with torch.cuda.stream(store_stream):
-                    # By default, the destination tensor will be in pinned memory: The logic to determine if the memory should be pinned is "pin_out = (non_blocking && self.is_cuda() && options.device().is_cpu() && (options.layout() == c10::kStrided))"
-                    # This is because cudaMemcpyAsync requires the destination memory to be pinned memory. Source: https://forums.developer.nvidia.com/t/cudamemcpyasync-device-to-host-need-to-synchronize-before-using-data-on-host/51750/6
-                    new_tensor = tensor.to("cpu", non_blocking=True)
+                with torch.no_grad():
+                    with torch.cuda.stream(store_stream):
+                        # By default, the destination tensor will be in pinned memory: The logic to determine if the memory should be pinned is "pin_out = (non_blocking && self.is_cuda() && options.device().is_cpu() && (options.layout() == c10::kStrided))"
+                        # This is because cudaMemcpyAsync requires the destination memory to be pinned memory. Source: https://forums.developer.nvidia.com/t/cudamemcpyasync-device-to-host-need-to-synchronize-before-using-data-on-host/51750/6
+                        new_tensor = tensor.to("cpu", non_blocking=True)
 
             # Block until the transfer finishes
             event = torch.cuda.Event()
@@ -460,10 +469,11 @@ class TorchMainMemoryIOAdapter(AdapterBase):
 
         # non_blocking copy uses cudaMemcpyAsync on current stream. ccording to /pytorch/aten/src/ATen/native/cuda/Copy.cu
         # Current stream is stored in thread-local variable and therefore thread-safe.
-        with torch.cuda.stream(load_stream):
-            tensor = self.cpu_tensor_cache[(path, shape, dtype, device)].to(
-                device, non_blocking=True
-            )
+        with torch.no_grad():
+            with torch.cuda.stream(load_stream):
+                tensor = self.cpu_tensor_cache[
+                    (path, shape, dtype, device)
+                ].to(device, non_blocking=True)
 
         # Block until the transfer finishes
         event = torch.cuda.Event()
@@ -495,6 +505,45 @@ class TorchMainMemoryIOAdapter(AdapterBase):
                     self.cpu_tensor_cache[(path, shape, dtype, device)]
                 )
         del self.cpu_tensor_cache[(path, shape, dtype, device)]
+
+
+class PeakTrackNoIOLossyAdapter(AdapterBase):
+    """This adapter is for dubugging purpose and aims to do nothing when it is supposed to store/reload tensors. Instead, it just store the reference to the tensor during storing tensors, and return the reference during loading tensors."""
+
+    peak_tracker: PeakMemoryTracker
+
+    def __init__(self):
+        self.peak_tracker = PeakMemoryTracker(0)
+
+    def create_new_filename(
+        self,
+        identifier: str,  # Used to distinguish tensors among distributed processes.
+        tensor: torch.Tensor,
+    ):
+        """
+        Create a filename for a new file when storing tensor on the device.
+        """
+        return create_new_filename(identifier, tensor, "/peak_track_no_io")
+
+    def save_tensor(
+        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+    ):
+        """
+        Save the tensor to the file.
+        """
+        self.peak_tracker._track_allocate_tensor(tensor.shape, tensor.dtype)
+
+    def load_tensor(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        """
+        Load the tensor from the file.
+        """
+        return torch.empty(shape, dtype=dtype, device=device)
 
 
 class TorchDummyIOAdapter(AdapterBase):
