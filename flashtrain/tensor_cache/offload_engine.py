@@ -118,8 +118,8 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         tensor_being_stored = [_ for _ in self.tensor_being_stored.values()]
         results = concurrent.futures.wait(tensor_being_stored)
         if len(self.tensor_being_stored) > 0:
-            logger.error(results)
-            logger.error(self.tensor_being_stored)
+            logger.critical(results)
+            logger.critical(self.tensor_being_stored)
         assert len(self.tensor_being_stored) == 0
 
     def wait_for_loading_queue(self) -> None:
@@ -149,21 +149,23 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         event = torch.cuda.Event()
         event.record(stream=torch.cuda.current_stream())
 
-        self.tensor_being_stored[tensor_id] = self.executor.submit(
+        future = self.executor.submit(
             self.adapter.async_save_tensor,
             tensor,
             tensor_id,
             self.tensor_id_to_filename_and_metadata[tensor_id][0],
             self.tensor_being_stored,
-            self.lock,
             event,
         )
+        with self.adapter.lock:
+            if not future.done():
+                self.tensor_being_stored[tensor_id] = future
 
     def prefetch_saved_tensors(self, tensor_ids: set[TensorEqID]) -> None:
         for tensor_id in tensor_ids:
             if not tensor_id in self.tensor_being_loaded:
                 # The tensor is not being prefetched. Prefetch the tensor.
-                self.tensor_being_loaded[tensor_id] = self.executor.submit(
+                future = self.executor.submit(
                     self.adapter.async_load_tensor,
                     self.tensor_id_to_filename_and_metadata[tensor_id][0],
                     self.tensor_id_to_filename_and_metadata[tensor_id][1],
@@ -172,8 +174,10 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                     self.tensor_id_to_loaded_tensor,
                     tensor_id,
                     self.tensor_being_loaded,
-                    self.lock,
                 )
+                with self.adapter.lock:
+                    if not future.done():
+                        self.tensor_being_loaded[tensor_id] = future
             # else: The tensor is being prefetched. Do nothing.
 
     def clean_up_in_backward(self, tensor_ids: set[TensorEqID]) -> None:
@@ -200,6 +204,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                     tensor_id,
                     None,
                 )
+            with self.adapter.lock:
                 del_dict_key_if_exists(
                     self.tensor_being_loaded,
                     tensor_id,

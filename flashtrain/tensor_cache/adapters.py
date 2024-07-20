@@ -34,6 +34,11 @@ def create_new_filename(
 
 
 class AdapterBase(metaclass=ABCMeta):
+    lock: threading.Lock
+
+    def __init__(self):
+        self.lock = threading.Lock()
+
     @abstractmethod
     def create_new_filename(
         self,
@@ -61,15 +66,17 @@ class AdapterBase(metaclass=ABCMeta):
         tensor_id: TensorEqID,
         path: str,
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
         event: torch.cuda.Event,
     ):
         self.save_tensor(tensor, path, event)
         logger.debug(f"Async wrapper saved tensor {tensor_id}")
-        with thread_lock:
+        with self.lock:
             if tensor_id in tensor_being_stored:
                 del tensor_being_stored[tensor_id]
             else:
+                logger.critical(
+                    f"Tensor {tensor_id} is not in tensor_being_stored"
+                )
                 # If not, it means the entry is already deleted from tensor_being_stored to signify the tensor is used in backward propagation before the storing is completed
                 self.clean_up_in_backward(
                     path, tensor.shape, tensor.dtype, tensor.device
@@ -114,18 +121,17 @@ class AdapterBase(metaclass=ABCMeta):
         tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
         tensor_id: TensorEqID,
         tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
     ):
         """
         Load the tensor from the file.
         """
-        with thread_lock:
+        with self.lock:
             if tensor_id in tensor_id_to_loaded_tensor:
                 del tensor_being_loaded[tensor_id]
                 return
         logger.debug(f"Async wrapper loading tensor from path {path}")
         loaded = self.load_tensor(path, shape, dtype, device)
-        with thread_lock:
+        with self.lock:
             tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
@@ -147,6 +153,7 @@ class TorchBuiltinIOAdapter(AdapterBase):
     lock: threading.Lock
 
     def __init__(self, path: str = "/tmp", num_streams: int = 2):
+        super().__init__()
         self.path = path
         self.streams = []
         for _ in range(num_streams):
@@ -248,13 +255,14 @@ class KvikioIOAdapter(AdapterBase):
     def __init__(
         self, path: str = "/tmp", num_streams: int = 2, is_async: bool = True
     ):
+        super().__init__()
         self.path = path
         self.is_async = is_async
         self.streams = []
         for _ in range(num_streams):
             self.streams.append(torch.cuda.Stream())
         self.current_stream_idx = 0
-        self.lock = threading.Lock()
+        # self.lock = threading.Lock()
 
     def create_new_filename(
         self,
@@ -360,12 +368,13 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         num_streams: int = 2,
         use_host_pinned_memory_allocator: bool = True,
     ):
+        super().__init__()
         self.cpu_tensor_cache = {}
         self.streams = []
         for _ in range(num_streams):
             self.streams.append(torch.cuda.Stream())
         self.current_stream_idx = 0
-        self.lock = threading.Lock()
+        # self.lock = threading.Lock()
         self.use_host_pinned_memory_allocator = (
             use_host_pinned_memory_allocator
         )
@@ -510,9 +519,11 @@ class TorchMainMemoryIOAdapter(AdapterBase):
 class PeakTrackNoIOLossyAdapter(AdapterBase):
     """This adapter is for dubugging purpose and aims to do nothing when it is supposed to store/reload tensors. Instead, it just store the reference to the tensor during storing tensors, and return the reference during loading tensors."""
 
+    lock: threading.Lock
     peak_tracker: PeakMemoryTracker
 
     def __init__(self):
+        super().__init__()
         self.peak_tracker = PeakMemoryTracker(0)
 
     def create_new_filename(
@@ -531,7 +542,10 @@ class PeakTrackNoIOLossyAdapter(AdapterBase):
         """
         Save the tensor to the file.
         """
-        self.peak_tracker._track_allocate_tensor(tensor.shape, tensor.dtype)
+        with self.peak_tracker.lock:
+            self.peak_tracker._track_allocate_tensor(
+                tensor.shape, tensor.dtype
+            )
 
     def load_tensor(
         self,
@@ -549,11 +563,13 @@ class PeakTrackNoIOLossyAdapter(AdapterBase):
 class TorchDummyIOAdapter(AdapterBase):
     """This adapter is for dubugging purpose and aims to do nothing when it is supposed to store/reload tensors. Instead, it just store the reference to the tensor during storing tensors, and return the reference during loading tensors."""
 
+    lock: threading.Lock
     gpu_tensor_cache: dict[
         tuple[str, torch.Size, torch.dtype, torch.device], torch.Tensor
     ]
 
     def __init__(self):
+        super().__init__()
         self.gpu_tensor_cache = {}
 
     def create_new_filename(
@@ -599,10 +615,12 @@ class TorchDummyIOAdapter(AdapterBase):
 
 
 class RevolverIOAdapter(AdapterBase):
+    lock: threading.Lock
     adapters: list[KvikioIOAdapter | Any]
     storage_adapters_id: int
 
     def __init__(self, adapters: list[KvikioIOAdapter | Any]):
+        super().__init__()
         self.adapters = adapters
         self.storage_adapters_id = 0
 
@@ -645,11 +663,10 @@ class RevolverIOAdapter(AdapterBase):
         tensor_id: TensorEqID,
         path: str,
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
         event: torch.cuda.Event,
     ):
         self.save_tensor(tensor, path, event)
-        with thread_lock:
+        with self.lock:
             if tensor_id in tensor_being_stored:
                 del tensor_being_stored[tensor_id]
             else:
@@ -684,17 +701,16 @@ class RevolverIOAdapter(AdapterBase):
         tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
         tensor_id: TensorEqID,
         tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future],
-        thread_lock: threading.Lock,
     ):
         """
         Load the tensor from the file.
         """
-        with thread_lock:
+        with self.lock:
             if tensor_id in tensor_id_to_loaded_tensor:
                 del tensor_being_loaded[tensor_id]
                 return
         loaded = self.load_tensor(path, shape, dtype, device)
-        with thread_lock:
+        with self.lock:
             tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
 
