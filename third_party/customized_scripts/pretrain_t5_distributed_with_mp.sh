@@ -34,7 +34,7 @@ T5_ARGS="
     --kv-channels 64 \
     --ffn-hidden-size 3072 \
     --encoder-seq-length 512 \
-    --decoder-seq-length 128 \
+    --decoder-seq-length 512 \
     --max-position-embeddings 512 \
     --micro-batch-size 16 \
     --global-batch-size 128 \

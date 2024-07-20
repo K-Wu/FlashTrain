@@ -63,9 +63,8 @@ MICRO_BATCH_SIZE=32
 ZERO_STAGE=0
 
 ## Activation checkpointing saves GPU memory, but reduces training speed
-# ACTIVATION_CHECKPOINT="true"
-ACTIVATION_CHECKPOINT="true"
-USE_TENSOR_CACHE="false"
+ACTIVATION_CHECKPOINT="false"
+USE_TENSOR_CACHE="true"
 
 LTD_ENABLED="false"
 
@@ -113,8 +112,8 @@ DISTRIBUTED_ARGS="
 # --profile-first-iter \
 
 BERT_ARGS="
+    --lossy-offload-first-iter \
     --use-pure-low-precision \
-    --profile-memory-beginning \
     --use-flash-attn-v2 \
     --use-distributed-optimizer \
     --no-bias-gelu-fusion \
@@ -124,8 +123,8 @@ BERT_ARGS="
     --hidden-size ${HIDDEN_SIZE} \
     --num-attention-heads ${NUM_ATTN_HEADS} \
     --init-method-std ${INIT_STD} \
-    --seq-length 512 \
-    --max-position-embeddings 512 \
+    --seq-length 1024 \
+    --max-position-embeddings 1024 \
     --micro-batch-size $MICRO_BATCH_SIZE \
     --global-batch-size $GLOBAL_BATCH_SIZE \
     --lr 0.0001 \
@@ -157,7 +156,7 @@ BERT_ARGS="${BERT_ARGS} \
     --random-ltd"
 fi
 
-
+#  --tensor-cache-log-level CRITICAL
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
   BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-in-memory-adapter --tensor-cache-log-level CRITICAL"
 fi
