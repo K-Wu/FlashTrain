@@ -325,11 +325,12 @@ class SimpleModelTestWithCache(TestCase):
                         next_stage=Stage.BACKWARD,
                     )
                     input = torch.rand(4, 5).cuda()
+                    input.requires_grad = True
                     if use_checkpoint != CheckpointMethod.NONE and i % 2 == 0:
                         # Test accumulation of pass with checkpointing and without.
                         if use_checkpoint == CheckpointMethod.TORCH:
                             output_withcache = checkpoint.checkpoint(
-                                model_withcache, input, use_reentrant=False
+                                model_withcache, input, use_reentrant=True
                             )
                         elif (
                             use_checkpoint

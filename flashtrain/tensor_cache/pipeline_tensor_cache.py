@@ -288,12 +288,12 @@ class PipelineTensorCache:
             ctx, reevaluate_forward_func, outputs
         )
 
-    def get_reevaluated_output(self):
+    def get_reevaluated_output(self, reevaluator_context: ActivationContext):
         return self.tensor_caches[
             self.current_microbatch_idx
-        ].get_reevaluated_output()
+        ].get_reevaluated_output(reevaluator_context)
 
-    def del_reevaluated_output(self):
-        self.tensor_caches[
-            self.current_microbatch_idx
-        ].del_reevaluated_output()
+    def del_reevaluated_output(self, reevaluator_context: ActivationContext):
+        self.tensor_caches[self.current_microbatch_idx].del_reevaluated_output(
+            reevaluator_context
+        )

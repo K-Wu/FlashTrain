@@ -155,9 +155,9 @@ class TensorCache:
     current_activation_context: ActivationContext | None
     current_reevaluator_context: ActivationContext | None
     activation_checkpoints: list[ActivationContext]
-    activation_checkpoint_to_module_id: dict[
-        ActivationContext, set[ModuleReentrantContext]
-    ]
+    # activation_checkpoint_to_module_id: dict[
+    #     ActivationContext, set[ModuleReentrantContext]
+    # ]
     # We bookkeep previous module to track if the activation context is done in the backward propagation pass (by checking if the previous module is triggered)
     previous_module_to_activation_context: dict[
         ModuleReentrantContext | ActivationContext | None, ActivationContext
@@ -278,6 +278,7 @@ class TensorCache:
         adapter: Optional[AdapterBase] = None,
         implicit_wait_and_set_in_backward: bool = False,
         skip_small_tensors: bool = True,
+        # If torch native checkpointing is used, notice that it must be use_reentrant=True if fine_grained_release_in_activation_context_backward == True
         fine_grained_release_in_activation_context_backward: bool = False,
         # If set, we offload the first few transformer layers and keep the activation in the last few transformer layers in the GPU memory.
         # TODO: In future, we can extend this to offloading the first few, recomputing the middle few, and keeping the activation in the last few layers. However, this will require changes in Megatron DeepSpeed's transformer module implementation.
@@ -330,7 +331,7 @@ class TensorCache:
         self.current_activation_context = None
         self.current_reevaluator_context = None
         self.activation_checkpoints = []
-        self.activation_checkpoint_to_module_id = {}
+        # self.activation_checkpoint_to_module_id = {}
         self.previous_module_to_activation_context = {}
         self.current_forward_module_scope_stack = []
         self.forward_done_modules = []
@@ -449,12 +450,20 @@ class TensorCache:
                         self.backward_done_modules_with_cache_to_clear.add(
                             activation_context
                         )
+                    if (
+                        self.fine_grained_release_in_activation_context_backward
+                        and (self.current_in_backward_activation_context)
+                    ):
+                        # We exited an activation context in the backward pass. Clear up the activation context and flag.
+                        self.current_in_backward_activation_context = False
+                        self.current_backward_activation_context = None
+                        self.current_forward_module_scope_stack.clear()
                 if len(self.backward_done_modules_with_cache_to_clear) > 0:
                     self.clear_up_done_backward_modules_cache()
 
                 self.activation_checkpoint_counter = 0
                 self.activation_checkpoints.clear()
-                self.activation_checkpoint_to_module_id.clear()
+                # self.activation_checkpoint_to_module_id.clear()
                 self.previous_module_to_activation_context.clear()
         else:
             # Clear modules in the delayed list due to all grad_input being None.
@@ -594,9 +603,9 @@ class TensorCache:
                     return
             # Create entries in data members.
             self.activation_checkpoints.append(self.current_activation_context)
-            self.activation_checkpoint_to_module_id[
-                self.current_activation_context
-            ] = set()
+            # self.activation_checkpoint_to_module_id[
+            #     self.current_activation_context
+            # ] = set()
             self.module_id_to_tensor_ids[
                 self.current_activation_context
             ] = set()
@@ -610,6 +619,12 @@ class TensorCache:
             # Bookkeep previous module
             previous_module = None
             if self.current_forward_module_scope_stack:
+                if isinstance(
+                    self.current_forward_module_scope_stack[-1],
+                    ActivationContext,
+                ):
+                    logger.critical(self.current_forward_module_scope_stack)
+                    logger.critical(self.current_activation_context)
                 assert not isinstance(
                     self.current_forward_module_scope_stack[-1],
                     ActivationContext,
@@ -667,11 +682,11 @@ class TensorCache:
             activation_context = self.previous_module_to_activation_context[
                 backward_pre_module
             ]
-            for module_id in self.activation_checkpoint_to_module_id[
-                activation_context
-            ]:
-                if not module_id in self.backward_done_modules:
-                    return None
+            # for module_id in self.activation_checkpoint_to_module_id[
+            #     activation_context
+            # ]:
+            #     if not module_id in self.backward_done_modules:
+            #         return None
             return activation_context
 
     def prefetch_next_module_in_backward(
@@ -845,9 +860,9 @@ class TensorCache:
                     self.current_forward_module_scope_stack[-1],
                     ActivationContext,
                 )
-                self.activation_checkpoint_to_module_id[
-                    self.current_activation_context
-                ].add(self.current_forward_module_scope_stack[-1])
+                # self.activation_checkpoint_to_module_id[
+                #     self.current_activation_context
+                # ].add(self.current_forward_module_scope_stack[-1])
 
         return forward_pre_hook
 
