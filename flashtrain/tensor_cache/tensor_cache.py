@@ -131,11 +131,12 @@ class TensorCache:
     fine_grained_release_in_activation_context_backward: bool
     enable_activation_context_recording: bool
     enable_prefetch: bool
-    implicit_wait_and_set_in_backward: bool
+    implicit_wait_and_set_backward: bool
     skip_small_tensors: bool
     ignored_module_names: set[str]
     ignored_module_recursively_names: set[str]
     adaptive_keep: bool
+    adaptive_keep_profiling_countdown: int
     num_kept_layers: int | None
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
@@ -276,7 +277,7 @@ class TensorCache:
         enable_activation_context_recording=False,
         enable_prefetch=True,
         adapter: Optional[AdapterBase] = None,
-        implicit_wait_and_set_in_backward: bool = False,
+        implicit_wait_and_set_backward: bool = False,
         skip_small_tensors: bool = True,
         # If torch native checkpointing is used, notice that it must be use_reentrant=True if fine_grained_release_in_activation_context_backward == True
         fine_grained_release_in_activation_context_backward: bool = False,
@@ -309,9 +310,7 @@ class TensorCache:
             enable_activation_context_recording
         )
         self.enable_prefetch = enable_prefetch
-        self.implicit_wait_and_set_in_backward = (
-            implicit_wait_and_set_in_backward
-        )
+        self.implicit_wait_and_set_backward = implicit_wait_and_set_backward
         self.skip_small_tensors = skip_small_tensors
         self.fine_grained_release_in_activation_context_backward = (
             fine_grained_release_in_activation_context_backward
@@ -321,6 +320,9 @@ class TensorCache:
             ignored_module_recursively_names
         )
         self.adaptive_keep = adaptive_keep
+        self.adaptive_keep_profiling_countdown = (
+            adaptive_keep_profiling_countdown
+        )
         self.num_kept_layers = None
 
         ##
@@ -487,7 +489,7 @@ class TensorCache:
         self.backward_done_modules.clear()
         self.offloader.print_loaded_tensors()
 
-    def set_in_forward(self):
+    def set_forward(self):
         """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is a must when activation context recording is enabled."""
         logger.debug("Set current_in_backward flag to False")
         self.current_in_backward = False
@@ -508,7 +510,7 @@ class TensorCache:
         }
         self.offloader.wait_for_storing_queue()
 
-    def set_in_backward(self):
+    def set_backward(self):
         """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
         logger.debug("Set current_in_backward flag to True")
         self.current_in_backward = True
@@ -696,7 +698,7 @@ class TensorCache:
         if len(self.next_module_to_previous_module) == 0:
             logger.warning(
                 "Producing next_module_to_previous_module. It is recommended"
-                " to call set_in_backward() before calling"
+                " to call set_backward() before calling"
                 " prefetch_next_module_in_backward()."
             )
             if self.saved_forward_done_modules is None:
@@ -923,7 +925,7 @@ class TensorCache:
                 f" {get_oneline_str(m._get_name())}"
             )
 
-            if not self.implicit_wait_and_set_in_backward:
+            if not self.implicit_wait_and_set_backward:
                 assert self.current_in_backward
             else:
                 if not self.current_in_backward:
@@ -933,7 +935,7 @@ class TensorCache:
                     )
                     with self.lock:
                         self.wait_forward()
-                        self.set_in_backward()
+                        self.set_backward()
 
             if self.enable_activation_context_recording:
                 # If the previous module to an activation context is triggered, it means the activation context is done in the backward propagation pass.

@@ -118,9 +118,9 @@ class PipelineTensorCache:
         self.current_microbatch_idx = idx_microbatch
         self.current_stage = stage
         if stage == Stage.FORWARD:
-            self.tensor_caches[idx_microbatch].set_in_forward()
+            self.tensor_caches[idx_microbatch].set_forward()
         elif stage == Stage.BACKWARD:
-            self.tensor_caches[idx_microbatch].set_in_backward()
+            self.tensor_caches[idx_microbatch].set_backward()
 
         self.next_microbatch_idx = next_idx_microbatch
         self.next_stage = next_stage
