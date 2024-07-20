@@ -1,5 +1,6 @@
 """Adapted from torch/cuda/_memory_viz.py
-Usage: python third_party/customized_scripts/memory_viz.py trace_memuse snapshot_beginning_0.pickle >snapshot_beginning_0.csv"""
+Usage: python third_party/customized_scripts/memory_viz.py trace_memuse snapshot_beginning_0.pickle >snapshot_beginning_0.csv
+Do not plot memory use vs time_us but instead plot memory use in order to reproduce the active memory timeline figure shown in pytorch.org/memory_viz or python -m torch.cuda._memory_viz trace_plot snapshot_beginning_0.pickle -o snapshot_beginning_0.html."""
 import io
 import sys
 import pickle
@@ -49,6 +50,7 @@ def get_time_vs_actual_mem_usage_plot_data(data):
         for idx_e, e in enumerate(entries):
             # print(e)
             time_us = e["time_us"] - start_time_us
+            # out.write(f"{time_us}, {byte_count}\n")
             if e["action"] == "alloc":
                 addr, size = e["addr"], e["size"]
                 n = _name()
@@ -59,7 +61,6 @@ def get_time_vs_actual_mem_usage_plot_data(data):
                 else:
                     offset = addr - seg_addr
                 # out.write(f'{n} = {seg_name}[{offset}:{Bytes(size)}]\n')
-                out.write(f"{time_us}, {byte_count}\n")
                 allocation_addr_to_name[addr] = (n, size, byte_count)
                 byte_count += size
             elif e["action"] == "free_requested":
@@ -68,7 +69,6 @@ def get_time_vs_actual_mem_usage_plot_data(data):
                     addr, (addr, None, None)
                 )
                 # out.write(f'del {name} # {Bytes(size)}\n')
-                out.write(f"{time_us}, {byte_count}\n")
             elif e["action"] == "free_completed":
                 addr, size = e["addr"], e["size"]
                 byte_count -= size
@@ -76,7 +76,6 @@ def get_time_vs_actual_mem_usage_plot_data(data):
                     addr, (addr, None, None)
                 )
                 # out.write(f'# free completed for {name} {Bytes(size)}\n')
-                out.write(f"{time_us}, {byte_count}\n")
                 if name in allocation_addr_to_name:
                     free_names.append(name)
                     del allocation_addr_to_name[name]
@@ -86,7 +85,6 @@ def get_time_vs_actual_mem_usage_plot_data(data):
                 # out.write(f'{name} = cudaMalloc({addr}, {Bytes(size)})\n')
                 segment_intervals.append((name, addr, size))
                 segment_addr_to_name[addr] = name
-                out.write(f"{time_us}, {byte_count}\n")
             elif e["action"] == "segment_free":
                 addr, size = e["addr"], e["size"]
                 name = segment_addr_to_name.get(addr, addr)
@@ -94,16 +92,15 @@ def get_time_vs_actual_mem_usage_plot_data(data):
                 if name in segment_addr_to_name:
                     free_names.append(name)
                     del segment_addr_to_name[name]
-                out.write(f"{time_us}, {byte_count}\n")
             elif e["action"] == "oom":
                 size = e["size"]
                 free = e["device_free"]
                 # out.write(f'raise OutOfMemoryError() # {Bytes(size)} requested, {Bytes(free)} free in CUDA\n')
-                out.write(f"{time_us}, OOM\n")
             else:
                 # out.write(f'{e}\n')
                 # print(e)
-                out.write(f"{time_us}, {byte_count}\n")
+                pass
+            out.write(f"{time_us}, {byte_count}\n")
         out.write(f"TOTAL MEM: {Bytes(byte_count)}")
 
     for i, d in enumerate(data["device_traces"]):
