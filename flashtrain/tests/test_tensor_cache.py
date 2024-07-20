@@ -87,7 +87,8 @@ class SimpleModelTestWithCache(TestCase):
     )
     @parametrize("enable_microbatch", [True, False])
     @parametrize(
-        "adapter_type", ["native", "main_memory", "kvikio", "revolver"]
+        "adapter_type",
+        ["native", "main_memory", "kvikio", "revolver", "lossy"],
     )
     def test_e2e_training(
         self,
@@ -110,20 +111,18 @@ class SimpleModelTestWithCache(TestCase):
         tensor_cache_args: dict[str, Any]
         if adapter_type == "main_memory":
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint
-                != CheckpointMethod.NONE,
                 "adapter": adapters.TorchMainMemoryIOAdapter(),
             }
         elif adapter_type == "kvikio":
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint
-                != CheckpointMethod.NONE,
                 "adapter": adapters.KvikioIOAdapter(),
+            }
+        elif adapter_type == "lossy":
+            tensor_cache_args = {
+                "adapter": adapters.PeakTrackNoIOLossyAdapter(),
             }
         elif adapter_type == "revolver":
             tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint
-                != CheckpointMethod.NONE,
                 "adapter": adapters.RevolverIOAdapter(
                     [
                         adapters.TorchBuiltinIOAdapter(),
@@ -133,12 +132,14 @@ class SimpleModelTestWithCache(TestCase):
             }
         else:
             assert adapter_type == "native"
-            tensor_cache_args = {
-                "enable_activation_context_recording": use_checkpoint
-                != CheckpointMethod.NONE,
-                "fine_grained_release_in_activation_context_backward": True,
-            }
+            tensor_cache_args = {}
+        tensor_cache_args["enable_activation_context_recording"] = (
+            use_checkpoint != CheckpointMethod.NONE
+        )
         tensor_cache_args["skip_small_tensors"] = False
+        tensor_cache_args[
+            "fine_grained_release_in_activation_context_backward"
+        ] = True
         if enable_microbatch:
             tensor_cache_args["num_microbatches"] = 2
             tensor_cache = PTC.PipelineTensorCache(**tensor_cache_args)
@@ -377,11 +378,22 @@ class SimpleModelTestWithCache(TestCase):
                 else:
                     tensor_cache.wait_backward()
             optim_withcache.step()
-            if not enable_microbatch:
+            if (not enable_microbatch) and (not adapter_type == "lossy"):
                 self.assertEqual(output, output_withcache)
         logger.info("Iterations end.")
 
-        if not enable_microbatch:
+        if (not enable_microbatch) and (not adapter_type == "lossy"):
+            if not enable_microbatch:
+                assert isinstance(tensor_cache, TC.TensorCache)
+                tensor_cache.set_in_forward()
+            else:
+                assert isinstance(tensor_cache, PTC.PipelineTensorCache)
+                tensor_cache.set_stage(
+                    0,
+                    Stage.FORWARD,
+                    next_idx_microbatch=0,
+                    next_stage=Stage.BACKWARD,
+                )
             self.assertEqual(model(input), model_withcache(input))
             self._compare_params(model, model_withcache)
 

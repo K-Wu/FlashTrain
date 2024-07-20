@@ -135,6 +135,8 @@ class TensorCache:
     skip_small_tensors: bool
     ignored_module_names: set[str]
     ignored_module_recursively_names: set[str]
+    adaptive_keep: bool
+    num_kept_layers: int | None
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -277,6 +279,11 @@ class TensorCache:
         implicit_wait_and_set_in_backward: bool = False,
         skip_small_tensors: bool = True,
         fine_grained_release_in_activation_context_backward: bool = False,
+        # If set, we offload the first few transformer layers and keep the activation in the last few transformer layers in the GPU memory.
+        # TODO: In future, we can extend this to offloading the first few, recomputing the middle few, and keeping the activation in the last few layers. However, this will require changes in Megatron DeepSpeed's transformer module implementation.
+        adaptive_keep: bool = True,
+        # Do the profiling in the second micro-batch. The first micro-batch is used to measure host pinned memory use.
+        adaptive_keep_profiling_countdown: int = 2,
         # To skip the numerous intermediate tensors in activation layer in the MLP blocks,
         # add "ParallelMLP" to ignored_module_names. Most of them are temporary tensor and
         # added to the graph only because they are in a torch.jit.script function. They
@@ -286,7 +293,7 @@ class TensorCache:
         ignored_module_names: set[str] = {
             # Skip large tensors in the last few (non-transformer) layers and the loss layer.
             "Loss",
-            "Model",
+            "Model",  # e.g, "BertModel", "GPTModel". This applies to the tensors not inside transformer layers.
             # "ParallelMLP",
         },
         # Skip large tensors in the last few (non-transformer) layers and the loss layer.
@@ -312,6 +319,8 @@ class TensorCache:
         self.ignored_module_recursively_names = (
             ignored_module_recursively_names
         )
+        self.adaptive_keep = adaptive_keep
+        self.num_kept_layers = None
 
         ##
         ## Dynamic / Change with new (micro-)batches
@@ -530,8 +539,12 @@ class TensorCache:
                 idx_frame = idx
 
         frame = inspect.currentframe()
-        for _ in range(idx_frame):
-            frame = frame.f_back
+        try:
+            for _ in range(idx_frame):
+                frame = frame.f_back
+        except Exception as e:
+            print(stack)
+            raise
         if (frame is None) or ("ctx" not in frame.f_locals):
             raise ValueError("ctx not found in the frame locals.")
         return frame.f_locals["ctx"]
@@ -639,17 +652,7 @@ class TensorCache:
         # In backward propagation, the checkpoint region is triggered if any of its module within it is triggered or any of the tensor within it is unpacked. To detect this, we need to maintain dictionary mapping from module id (+reentrent) to activation context and from tensor to activation context. This is not needed because there is no need to maintain which activation context we are currently in when we are in the backward pass, but only which activation context we have done.
         """In backward propagation, the checkpoint region is done after all modules within it are done and the backward process of the previous (in forward propagation) layer is triggered. To detect this, we need to maintain activation context to modules and previous-module to activation context."""
         assert self.enable_activation_context_recording
-        if not self.implicit_wait_and_set_in_backward:
-            assert self.current_in_backward
-        else:
-            if not self.current_in_backward:
-                logger.warning(
-                    "Implicitly setting current_in_backward to True"
-                    " because it is not set."
-                )
-                with self.lock:
-                    self.wait_forward()
-                    self.set_in_backward()
+        assert self.current_in_backward
         if backward_pre_hook_target:
             backward_pre_module = ModuleReentrantContext(
                 module_id=id(backward_pre_hook_target),
@@ -710,6 +713,7 @@ class TensorCache:
                 )
                 self.prefetch_saved_tensors(module_to_prefetch)
 
+    # TODO: parameterize the function to check if the module is the x-th last modules
     def is_last_module_in_forward(
         self, m: torch.nn.Module, is_pre_hook: bool = True
     ) -> bool:
@@ -722,7 +726,6 @@ class TensorCache:
         else:
             reenter_count = self.module_id_to_reenter_count.get(id(m), 1) - 1
 
-        # TODO: parameterize the function to check if the module is the x-th last modules
         return (
             ModuleReentrantContext(
                 module_id=id(m),
@@ -731,6 +734,7 @@ class TensorCache:
             == self.saved_forward_done_modules[-1]
         )
 
+    # TODO: parameterize the function to check if the module is the x-th last modules
     def prefetch_last_module_in_forward_if_not_None(self):
         # Do the prefetch
         if self.saved_forward_done_modules is not None:
@@ -858,7 +862,7 @@ class TensorCache:
                             or self.current_in_backward_activation_context
                         )
                     ):
-                        raise NotImplementedError
+                        pass
                     else:
                         # Skipping this hook in the backward propagation to avoid issue in activation recomputation.
                         logger.debug(
@@ -903,6 +907,18 @@ class TensorCache:
                 f"Full backward pre hook for ({id(m)})"
                 f" {get_oneline_str(m._get_name())}"
             )
+
+            if not self.implicit_wait_and_set_in_backward:
+                assert self.current_in_backward
+            else:
+                if not self.current_in_backward:
+                    logger.warning(
+                        "Implicitly setting current_in_backward to True"
+                        " because it is not set."
+                    )
+                    with self.lock:
+                        self.wait_forward()
+                        self.set_in_backward()
 
             if self.enable_activation_context_recording:
                 # If the previous module to an activation context is triggered, it means the activation context is done in the backward propagation pass.
