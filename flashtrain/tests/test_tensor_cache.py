@@ -210,7 +210,7 @@ class SimpleModelTestWithCache(TestCase):
             # Ensure all input across TP ranks are same.
             if not enable_microbatch:
                 assert isinstance(tensor_cache, TC.TensorCache)
-                tensor_cache.set_in_forward()
+                tensor_cache.set_forward()
             else:
                 assert isinstance(tensor_cache, PTC.PipelineTensorCache)
                 tensor_cache.set_stage(
@@ -310,7 +310,7 @@ class SimpleModelTestWithCache(TestCase):
                 else:
                     assert isinstance(tensor_cache, TC.TensorCache)
                     tensor_cache.wait_forward()
-                    tensor_cache.set_in_backward()
+                    tensor_cache.set_backward()
 
                 logger.info("Iterations forward end.")
                 loss_withcache.backward()
@@ -386,7 +386,7 @@ class SimpleModelTestWithCache(TestCase):
         if (not enable_microbatch) and (not adapter_type == "lossy"):
             if not enable_microbatch:
                 assert isinstance(tensor_cache, TC.TensorCache)
-                tensor_cache.set_in_forward()
+                tensor_cache.set_forward()
             else:
                 assert isinstance(tensor_cache, PTC.PipelineTensorCache)
                 tensor_cache.set_stage(
