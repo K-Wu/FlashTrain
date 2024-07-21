@@ -129,7 +129,7 @@ class PipelineTensorCache:
 
     def wait_current_stage(self):
         if self.current_stage == Stage.FORWARD:
-            self.tensor_caches[self.current_microbatch_idx].wait_forward()
+            self.tensor_caches[self.current_microbatch_idx].finish_up_forward()
         else:
             assert self.current_stage == Stage.BACKWARD
             self.tensor_caches[self.current_microbatch_idx].wait_backward()

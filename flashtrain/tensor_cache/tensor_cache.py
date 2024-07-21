@@ -136,7 +136,13 @@ class TensorCache:
     ignored_module_names: set[str]
     ignored_module_recursively_names: set[str]
     adaptive_keep: bool
-    adaptive_keep_profiling_countdown: int
+    adaptive_keep_profiling_begin_iter: int
+    adaptive_keep_profiling_end_iter: int
+    current_forward_iter: int
+    adaptive_keep_layer_names: set[str]
+    # self.adaptive_keep_modules_data = {'forward':{"historical_compute_time": list[float, ...], "historical_IO_time": list[float, ...], "current_iter_compute_events":list[torch.cuda.Event,...], "current_iter_IO_events":list[torch.cuda.Event,...]},
+    #                                    ModuleReentrantContext:{"historical_time": list[float, ...], "current_iter_events":list[torch.cuda.Event,...],"index": int, "packed_data_size": int, "each_packed_data_size": list[int]}}
+    adaptive_keep_modules_data: dict[ModuleReentrantContext | str, dict]
     num_kept_layers: int | None
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
@@ -284,8 +290,16 @@ class TensorCache:
         # If set, we offload the first few transformer layers and keep the activation in the last few transformer layers in the GPU memory.
         # TODO: In future, we can extend this to offloading the first few, recomputing the middle few, and keeping the activation in the last few layers. However, this will require changes in Megatron DeepSpeed's transformer module implementation.
         adaptive_keep: bool = True,
-        # Do the profiling in the second micro-batch. The first micro-batch is used to measure host pinned memory use.
-        adaptive_keep_profiling_countdown: int = 2,
+        # By default, do the profiling in the second micro-batch until the third micro-batch (not including the end_iter). We skip the first micro-batch because it is used to measure host pinned memory use.
+        adaptive_keep_profiling_begin_iter: int = 2,
+        adaptive_keep_profiling_end_iter: int = 3,
+        # The module names of each layer that tensor cache should track. The last few layers will be kept in the GPU memory.
+        # Coarser granularity {"ParallelTransformer"}
+        # Finer granularity {"ParallelAttention", "ParallelMLP"}
+        adaptive_keep_layer_names: set[str] = {
+            "ParallelAttention",
+            "ParallelMLP",
+        },
         # To skip the numerous intermediate tensors in activation layer in the MLP blocks,
         # add "ParallelMLP" to ignored_module_names. Most of them are temporary tensor and
         # added to the graph only because they are in a torch.jit.script function. They
@@ -320,9 +334,15 @@ class TensorCache:
             ignored_module_recursively_names
         )
         self.adaptive_keep = adaptive_keep
-        self.adaptive_keep_profiling_countdown = (
-            adaptive_keep_profiling_countdown
+        self.adaptive_keep_profiling_begin_iter = (
+            adaptive_keep_profiling_begin_iter
         )
+        self.adaptive_keep_profiling_end_iter = (
+            adaptive_keep_profiling_end_iter
+        )
+        self.current_forward_iter = 0
+        self.adaptive_keep_layer_names = adaptive_keep_layer_names
+        self.adaptive_keep_modules_data = {}
         self.num_kept_layers = None
 
         ##
@@ -439,6 +459,137 @@ class TensorCache:
         )
 
     def wait_backward(self):
+        # Read the timing of select modules and the forward propagation if in the specified iteration range
+        if self.adaptive_keep and (
+            self.adaptive_keep_profiling_begin_iter
+            <= self.current_forward_iter
+            < self.adaptive_keep_profiling_end_iter
+        ):
+            # Make sure the forward propagation has completed.
+            self.adaptive_keep_modules_data["all"][
+                "current_iter_compute_events"
+            ][1].synchronize()
+            self.adaptive_keep_modules_data["all"]["current_iter_IO_events"][1]
+            for event in self.adaptive_keep_modules_data["all"][
+                "current_iter_IO_events"
+            ][1]:
+                event.synchronize()
+            for key in self.adaptive_keep_modules_data:
+                if key == "all":
+                    assert (
+                        len(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_compute_events"
+                            ]
+                        )
+                    ) == 2
+                    assert (
+                        len(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_IO_events"
+                            ]
+                        )
+                    ) == 2
+                    if (
+                        "historical_compute_time"
+                        not in self.adaptive_keep_modules_data[key]
+                    ):
+                        self.adaptive_keep_modules_data[key][
+                            "historical_compute_time"
+                        ] = []
+                    if (
+                        "historical_IO_time"
+                        not in self.adaptive_keep_modules_data[key]
+                    ):
+                        self.adaptive_keep_modules_data[key][
+                            "historical_IO_time"
+                        ] = []
+                    if (
+                        "historical_first_IO_timestamp"
+                        not in self.adaptive_keep_modules_data[key]
+                    ):
+                        self.adaptive_keep_modules_data[key][
+                            "historical_first_IO_timestamp"
+                        ] = []
+                    IO_time = []
+                    for event in self.adaptive_keep_modules_data[key][
+                        "current_iter_IO_events"
+                    ][1]:
+                        IO_time.append(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_IO_events"
+                            ][0].elapsed_time(event)
+                        )
+                    self.adaptive_keep_modules_data[key][
+                        "historical_first_IO_timestamp"
+                    ].append(
+                        self.adaptive_keep_modules_data[key][
+                            "current_iter_compute_events"
+                        ][0].elapsed_time(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_IO_events"
+                            ][0]
+                        )
+                    )
+                    self.adaptive_keep_modules_data[key][
+                        "historical_IO_time"
+                    ].append(max(IO_time))
+                    self.adaptive_keep_modules_data[key][
+                        "historical_compute_time"
+                    ].append(
+                        self.adaptive_keep_modules_data[key][
+                            "current_iter_compute_events"
+                        ][0].elapsed_time(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_compute_events"
+                            ][1]
+                        )
+                    )
+                    del self.adaptive_keep_modules_data[key][
+                        "current_iter_compute_events"
+                    ]
+                    del self.adaptive_keep_modules_data[key][
+                        "current_iter_IO_events"
+                    ]
+                else:
+                    assert (
+                        len(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_events"
+                            ]
+                        )
+                    ) == 2
+                    if (
+                        "historical_time"
+                        not in self.adaptive_keep_modules_data[key]
+                    ):
+                        self.adaptive_keep_modules_data[key][
+                            "historical_time"
+                        ] = []
+                    self.adaptive_keep_modules_data[key][
+                        "current_iter_events"
+                    ][1].synchronize()
+                    self.adaptive_keep_modules_data[key][
+                        "historical_time"
+                    ].append(
+                        self.adaptive_keep_modules_data[key][
+                            "current_iter_events"
+                        ][0].elapsed_time(
+                            self.adaptive_keep_modules_data[key][
+                                "current_iter_events"
+                            ][1]
+                        )
+                    )
+                    del self.adaptive_keep_modules_data[key][
+                        "current_iter_events"
+                    ]
+
+            logger.info(
+                f"Adaptive keep profiling: {self.adaptive_keep_modules_data}"
+            )
+            logger.error(
+                f"Adaptive keep profiling: {self.adaptive_keep_modules_data}"
+            )
         if self.enable_activation_context_recording:
             # Except for the first forward pass, we are in the backward pass and need to do clear up.
             if self.current_in_backward:
@@ -481,20 +632,48 @@ class TensorCache:
                 self.delayed_backward_done_modules_with_cache_to_clear.clear()
 
         if self.saved_forward_done_modules is None:
+            logger.warning(
+                "Building saved_forward_done_modules in"
+                " prefetch_next_module_in_backward(). It should be built"
+                " already in finish_up_forward()"
+            )
             self.build_ignored_modules_and_last_modules()
 
         # Clear all the data structures that are only used in the backward pass that is just finished.
         # logger.error(get_oneline_str("backward_done_modules", self.backward_done_modules))
         self.forward_done_modules.clear()
         self.backward_done_modules.clear()
-        self.offloader.print_loaded_tensors()
+        self.current_forward_iter += 1
+        # self.offloader.print_loaded_tensors()
 
     def set_forward(self):
         """Set self.current_in_backward to indicate that the runtime is in forward pass. Bookkeeping the flag during training is a must when activation context recording is enabled."""
         logger.debug("Set current_in_backward flag to False")
         self.current_in_backward = False
 
-    def wait_forward(self):
+    def finish_up_forward(self):
+        # Profile the timing of the forward propagation if in the specified iteration range
+        if self.adaptive_keep and (
+            self.adaptive_keep_profiling_begin_iter
+            <= self.current_forward_iter
+            < self.adaptive_keep_profiling_end_iter
+        ):
+            event = torch.cuda.Event(enable_timing=True)
+            event.record(stream=torch.cuda.current_stream())
+            self.adaptive_keep_modules_data["all"][
+                "current_iter_compute_events"
+            ].append(event)
+
+            self.adaptive_keep_modules_data["all"][
+                "current_iter_IO_events"
+            ].append([])
+            for stream in self.offloader.engine.adapter.streams:
+                event = torch.cuda.Event(enable_timing=True)
+                event.record(stream=stream)
+                self.adaptive_keep_modules_data["all"][
+                    "current_iter_IO_events"
+                ][1].append(event)
+
         if self.enable_activation_context_recording:
             self._update_current_activation_context_in_forward()
         self.current_forward_module_scope_stack.clear()
@@ -508,7 +687,7 @@ class TensorCache:
             ]: self.saved_forward_done_modules[idx]
             for idx in range(len(self.saved_forward_done_modules) - 1)
         }
-        self.offloader.wait_for_storing_queue()
+        # self.offloader.wait_for_storing_queue()
 
     def set_backward(self):
         """Set self.current_in_backward to indicate that the runtime is in backward pass. This flag is used to turn off forward hook and pass hook in the backward pass to avoid them being triggered in activation recomputation.  Bookkeeping the flag during training is a must when activation context recording is enabled."""
@@ -702,6 +881,11 @@ class TensorCache:
                 " prefetch_next_module_in_backward()."
             )
             if self.saved_forward_done_modules is None:
+                logger.warning(
+                    "Building saved_forward_done_modules in"
+                    " prefetch_next_module_in_backward(). It should be built"
+                    " already in finish_up_forward()"
+                )
                 self.build_ignored_modules_and_last_modules()
             assert self.saved_forward_done_modules is not None
             # Build next_module_to_previous_module based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
@@ -832,6 +1016,7 @@ class TensorCache:
                     " exists in self.module_id_to_module"
                 )
 
+            # TODO: For now, for self.fine_grained_release_in_activation_context_backward, the reenter_count is incremented in backward pass during the recomputation-forward pass. It may cause collision and reduce the precision of tensor release in the clean up function call.
             self.module_id_to_reenter_count[id(m)] = (
                 # Get the reenter count in case this is the first reentrance
                 self.module_id_to_reenter_count.get(id(m), 0)
@@ -843,6 +1028,40 @@ class TensorCache:
                     reenter_count=self.module_id_to_reenter_count[id(m)] - 1,
                 )
             )
+
+            if self.adaptive_keep and (not self.current_in_backward):
+                if m._get_name() in self.adaptive_keep_layer_names:
+                    # In the first forward iteration, record the module if self.adaptive_keep and module name is in self.adaptive_keep_layer_names
+                    if self.current_forward_iter == 0:
+                        self.adaptive_keep_modules_data[
+                            self.current_forward_module_scope_stack[-1]
+                        ] = dict()
+                        self.adaptive_keep_modules_data[
+                            self.current_forward_module_scope_stack[-1]
+                        ]["index"] = len(self.adaptive_keep_modules_data)
+
+                    # Profile the timing of this module if in the specified iteration range
+                    if (
+                        self.adaptive_keep_profiling_begin_iter
+                        <= self.current_forward_iter
+                        < self.adaptive_keep_profiling_end_iter
+                    ):
+                        event = torch.cuda.Event(enable_timing=True)
+                        event.record(stream=torch.cuda.current_stream())
+                        self.adaptive_keep_modules_data[
+                            self.current_forward_module_scope_stack[-1]
+                        ]["current_iter_events"] = [event]
+
+                        # Profile the very beginning of the forward pass
+                        if "all" not in self.adaptive_keep_modules_data:
+                            self.adaptive_keep_modules_data["all"] = dict()
+                        if (
+                            "current_iter_compute_events"
+                            not in self.adaptive_keep_modules_data["all"]
+                        ):
+                            self.adaptive_keep_modules_data["all"][
+                                "current_iter_compute_events"
+                            ] = [event]
 
             if (
                 self.current_forward_module_scope_stack[-1]
@@ -910,6 +1129,18 @@ class TensorCache:
             self.forward_done_modules.append(
                 self.current_forward_module_scope_stack[-1]
             )
+            if self.adaptive_keep and (
+                self.adaptive_keep_profiling_begin_iter
+                <= self.current_forward_iter
+                < self.adaptive_keep_profiling_end_iter
+            ):
+                # Profile the timing of this module if in the specified iteration range
+                if m._get_name() in self.adaptive_keep_layer_names:
+                    event = torch.cuda.Event(enable_timing=True)
+                    event.record(stream=torch.cuda.current_stream())
+                    self.adaptive_keep_modules_data[
+                        self.current_forward_module_scope_stack[-1]
+                    ]["current_iter_events"].append(event)
             if self.saved_forward_done_modules is None:
                 self.forward_modules_whole_stack.append(
                     self.current_forward_module_scope_stack.copy()
@@ -934,7 +1165,7 @@ class TensorCache:
                         " because it is not set."
                     )
                     with self.lock:
-                        self.wait_forward()
+                        self.finish_up_forward()
                         self.set_backward()
 
             if self.enable_activation_context_recording:
@@ -1140,6 +1371,63 @@ class TensorCache:
                     )
                     self.offloader.add_loaded_tensor(tensor_id, tensor)
                 else:
+                    if (
+                        self.adaptive_keep
+                        and (not self.current_in_backward)
+                        and (
+                            self.adaptive_keep_profiling_begin_iter
+                            <= self.current_forward_iter
+                            < self.adaptive_keep_profiling_end_iter
+                        )
+                    ):
+                        # BookKeep the packed tensor size in the first profiling iteration
+                        if (
+                            self.adaptive_keep_profiling_begin_iter
+                            == self.current_forward_iter
+                        ):
+                            for module_id in reversed(
+                                self.current_forward_module_scope_stack
+                            ):
+                                if (
+                                    module_id
+                                    in self.adaptive_keep_modules_data
+                                ):
+                                    tensor_size = (
+                                        math.prod(tensor.size())
+                                        * tensor.element_size()
+                                    )
+                                    if (
+                                        "each_packed_data_size"
+                                        not in self.adaptive_keep_modules_data[
+                                            module_id
+                                        ]
+                                    ):
+                                        self.adaptive_keep_modules_data[
+                                            module_id
+                                        ]["each_packed_data_size"] = []
+                                        self.adaptive_keep_modules_data[
+                                            module_id
+                                        ]["packed_data_size"] = 0
+                                    self.adaptive_keep_modules_data[module_id][
+                                        "each_packed_data_size"
+                                    ].append(tensor_size)
+                                    self.adaptive_keep_modules_data[module_id][
+                                        "packed_data_size"
+                                    ] += tensor_size
+
+                        # In the specified profiling iterations, profile the very beginning of the forward IO event
+                        if "all" not in self.adaptive_keep_modules_data:
+                            self.adaptive_keep_modules_data["all"] = dict()
+                        if (
+                            "current_iter_IO_events"
+                            not in self.adaptive_keep_modules_data["all"]
+                        ):
+                            event = torch.cuda.Event(enable_timing=True)
+                            event.record(stream=torch.cuda.current_stream())
+                            self.adaptive_keep_modules_data["all"][
+                                "current_iter_IO_events"
+                            ] = [event]
+
                     logger.info(
                         f"Packing {tensor_id}, size {math.prod(tensor.size())}"
                     )
