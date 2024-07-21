@@ -145,6 +145,9 @@ class TensorCache:
     adaptive_keep_modules_data: dict[ModuleReentrantContext | str, dict]
     num_kept_layers: int | None
 
+    # Measured GPU memory usage by activation
+    measured_activation_gpu_memory_size: int
+
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
 
@@ -344,6 +347,8 @@ class TensorCache:
         self.adaptive_keep_layer_names = adaptive_keep_layer_names
         self.adaptive_keep_modules_data = {}
         self.num_kept_layers = None
+
+        self.measured_activation_gpu_memory_size = 0
 
         ##
         ## Dynamic / Change with new (micro-)batches
@@ -1262,6 +1267,16 @@ class TensorCache:
             tensor_id: TensorEqID = TensorEqID.from_tensor(
                 tensor, self.lock if self.current_in_backward else None
             )
+
+            # Measure activation memory size in the first forward pass
+            if (
+                self.current_forward_iter == 0
+                and (not self.current_in_backward)
+                and tensor.device.type != "cpu"
+                and (not tensor_id in self.parameters_and_inputs)
+            ):
+                tensor_size = math.prod(tensor.size()) * tensor.element_size()
+                self.measured_activation_gpu_memory_size += tensor_size
 
             # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
             if tensor.device.type == "cpu":
