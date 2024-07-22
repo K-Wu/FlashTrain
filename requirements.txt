@@ -14,3 +14,4 @@ sentencepiece
 einops
 hypothesis
 flash-attn
+pyinstrument

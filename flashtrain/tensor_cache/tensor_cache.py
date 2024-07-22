@@ -457,7 +457,7 @@ class TensorCache:
                 self.saved_ignored_last_modules.add(m)
             else:
                 self.saved_forward_done_modules.append(m)
-        logger.critical(
+        logger.error(
             get_oneline_str(
                 "saved_ignored_last_modules", self.saved_ignored_last_modules
             )

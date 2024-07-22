@@ -1,4 +1,5 @@
 import kvikio
+import kvikio.defaults
 import cupy
 import torch
 from ..logger import logger, get_oneline_str
@@ -262,6 +263,11 @@ class KvikioIOAdapter(AdapterBase):
         for _ in range(num_streams):
             self.streams.append(torch.cuda.Stream())
         self.current_stream_idx = 0
+        kvikio.defaults.set_compat_mode(False)
+        assert kvikio.defaults.compat_mode() == False, (
+            "Kvikio compat mode is not disabled. Check if you install cuFile"
+            " library!"
+        )
         # self.lock = threading.Lock()
 
     def create_new_filename(
@@ -298,12 +304,17 @@ class KvikioIOAdapter(AdapterBase):
                     future = f.raw_write_async(
                         tensor_cupy, store_stream.cuda_stream
                     )
-                    future.check_bytes_done()
+                    # future.check_bytes_done()
+                    # store_stream.synchronize()
+                    # Create and wait for event
+                    event = torch.cuda.Event()
+                    event.record(store_stream)
+                    event.synchronize()
                 else:
                     f.write(tensor_cupy)
 
         except Exception as e:
-            logger.error(f"Error in saving tensor to path {path}: {e}")
+            logger.critical(f"Error in saving tensor to path {path}: {e}")
         logger.debug(
             "Kvikio Saved tensor"
             f" {get_oneline_str(tensor_cupy, verbose_only=True)} ({TensorEqID.from_tensor(tensor)})"
@@ -336,12 +347,21 @@ class KvikioIOAdapter(AdapterBase):
                 self.streams
             )
 
-        with kvikio.CuFile(path, "r") as f:
-            if self.is_async:
-                future = f.raw_read_async(tensor, load_stream.cuda_stream)
-                future.check_bytes_done()
-            else:
-                f.read(tensor)
+        try:
+            with kvikio.CuFile(path, "r+") as f:
+                if self.is_async:
+                    future = f.raw_read_async(tensor, load_stream.cuda_stream)
+                    # future.check_bytes_done()
+                    # load_stream.synchronize()
+                    # Create and wait for event
+                    event = torch.cuda.Event()
+                    event.record(load_stream)
+                    event.synchronize()
+                else:
+                    f.read(tensor)
+        except Exception as e:
+            logger.critical(f"Error in loading tensor from path {path}: {e}")
+
         logger.debug(
             "Kvikio Loading tensor"
             f" {get_oneline_str(tensor, verbose_only=True)} from path {path}"
