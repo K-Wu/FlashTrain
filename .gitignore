@@ -43,3 +43,5 @@ today_job.sh
 *.pickle
 *.csv
 *.html
+*.so
+build/
