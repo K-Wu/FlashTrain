@@ -1,15 +1,15 @@
 import torch
 
 torch.ops.load_library(
-    "/home/kunwu2/FlashTrain/flashtrain/cuda_registered_allocator/build/lib.linux-x86_64-cpython-310/cuda_reistered_allocator.cpython-310-x86_64-linux-gnu.so"
+    "/home/kunwu2/FlashTrain/flashtrain/cuda_registered_allocator/build2/_torch_allocator.so"
 )
-# Load the allocator
+
 new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
-    #'/home/kunwu2/FlashTrain/flashtrain/cuda_registered_allocator/allocator.so',
-    "/home/kunwu2/FlashTrain/flashtrain/cuda_registered_allocator/build/lib.linux-x86_64-cpython-310/cuda_reistered_allocator.cpython-310-x86_64-linux-gnu.so",
-    "my_malloc",
-    "my_free",
+    "/home/kunwu2/FlashTrain/flashtrain/cuda_registered_allocator/build2/_torch_allocator.so",
+    "allocate",
+    "deallocate",
 )
+
 # Swap the current allocator
 torch.cuda.memory.change_current_allocator(new_alloc)
 torch.ops.cuda_registered_allocator.reset_verbose_flag(True)

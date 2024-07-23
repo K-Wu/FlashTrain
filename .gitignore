@@ -45,3 +45,5 @@ today_job.sh
 *.html
 *.so
 build/
+build*/
+*.bak
