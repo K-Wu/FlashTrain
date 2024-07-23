@@ -47,3 +47,4 @@ today_job.sh
 build/
 build*/
 *.bak
+*.txt

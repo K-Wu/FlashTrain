@@ -1,0 +1,1 @@
+We create a simple cuda malloc hook instead of using custom allocator. We archive the unused (but working) source code and test case here in this folder.
