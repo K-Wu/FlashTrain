@@ -16,3 +16,9 @@ sudo mkfs.ext4 /dev/md2
 sudo mkfs.ext4 /dev/md3
 sudo mkdir -p /mnt/md2
 sudo mkdir -p /mnt/md3
+
+
+sudo mkfs.ext4 /dev/md4
+sudo mkfs.ext4 /dev/md5
+sudo mkdir -p /mnt/md4
+sudo mkdir -p /mnt/md5
