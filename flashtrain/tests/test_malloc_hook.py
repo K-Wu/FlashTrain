@@ -1,5 +1,4 @@
-# Usage: LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so python /home/kunwu2/Fla
-shTrain / flashtrain / tests / test_malloc_hook.py
+# Usage: LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so python /home/kunwu2/FlashTrain / flashtrain / tests / test_malloc_hook.py
 import torch
 
 print("Loading hook.so")
@@ -9,6 +8,7 @@ libcuda_hook = ctypes.CDLL(
     "/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so",
     mode=ctypes.RTLD_GLOBAL,
 )
+libcuda_hook.set_verbose(True)
 torch.randn(15).cuda()
 # Call empty_cache to trigger cudaFree and force calling cudaMallow in the next tensor creation call.
 torch.cuda.empty_cache()
