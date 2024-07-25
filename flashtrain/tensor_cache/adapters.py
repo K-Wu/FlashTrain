@@ -15,6 +15,7 @@ from .host_pinned_memory_allocator import (
     PeakMemoryTracker,
 )
 from typing import Optional
+import time
 
 
 def create_new_filename(
@@ -75,7 +76,7 @@ class AdapterBase(metaclass=ABCMeta):
             if tensor_id in tensor_being_stored:
                 del tensor_being_stored[tensor_id]
             else:
-                logger.critical(
+                logger.error(
                     f"Tensor {tensor_id} is not in tensor_being_stored"
                 )
                 # If not, it means the entry is already deleted from tensor_being_stored to signify the tensor is used in backward propagation before the storing is completed
@@ -248,10 +249,13 @@ class TorchBuiltinIOAdapter(AdapterBase):
 
 class KvikioIOAdapter(AdapterBase):
     path: str
-    streams: list[torch.cuda.Stream]
-    current_stream_idx: int
     lock: threading.Lock
     is_async: bool
+    streams: list[torch.cuda.Stream] | None
+    current_stream_idx: int | None
+    is_being_profiled: bool | None
+    start_timestamp: list[float] | None
+    end_timestamp: list[float] | None
 
     def __init__(
         self, path: str = "/tmp", num_streams: int = 2, is_async: bool = True
@@ -259,15 +263,39 @@ class KvikioIOAdapter(AdapterBase):
         super().__init__()
         self.path = path
         self.is_async = is_async
-        self.streams = []
-        for _ in range(num_streams):
-            self.streams.append(torch.cuda.Stream())
-        self.current_stream_idx = 0
+
+        if is_async:
+            self.streams = []
+            self.current_stream_idx = 0
+            self.is_being_profiled = None
+            self.start_timestamp = None
+            self.end_timestamp = None
+        else:
+            self.streams = None
+            self.current_stream_idx = None
+            self.is_being_profiled = False
+            self.start_timestamp = []
+            self.end_timestamp = []
+
+        if (not is_async) and num_streams > 0:
+            logger.error(
+                "KvikioIOAdapter does not use streams when is_async is False."
+                " Ignoring num_streams"
+            )
+        else:
+            for _ in range(num_streams):
+                self.streams.append(torch.cuda.Stream())
+
         kvikio.defaults.set_compat_mode(False)
         assert kvikio.defaults.compat_mode() == False, (
             "Kvikio compat mode is not disabled. Check if you install cuFile"
             " library!"
         )
+        if kvikio.defaults.get_num_threads() == 1:
+            logger.error(
+                "Kvikio is not using multiple threads. This may slow down the"
+                " performance."
+            )
         # self.lock = threading.Lock()
 
     def create_new_filename(
@@ -290,17 +318,23 @@ class KvikioIOAdapter(AdapterBase):
         # Issue at https://github.com/cupy/cupy/issues/7144
         tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
 
-        with self.lock:
-            store_stream = self.streams[self.current_stream_idx]
-            self.current_stream_idx = (self.current_stream_idx + 1) % len(
-                self.streams
-            )
+        if self.is_async:
+            assert self.streams is not None
+            assert self.current_stream_idx is not None
+            with self.lock:
+                store_stream = self.streams[self.current_stream_idx]
+                self.current_stream_idx = (self.current_stream_idx + 1) % len(
+                    self.streams
+                )
+        else:
+            with self.lock:
+                self.start_timestamp.append(time.time())
 
         try:
             with kvikio.CuFile(path, "w") as f:
-                # Wait until the computation finishes before saving the tensor
-                store_stream.wait_event(event)
                 if self.is_async:
+                    # Wait until the computation finishes before saving the tensor
+                    store_stream.wait_event(event)
                     future = f.raw_write_async(
                         tensor_cupy, store_stream.cuda_stream
                     )
@@ -311,7 +345,10 @@ class KvikioIOAdapter(AdapterBase):
                     event.record(store_stream)
                     event.synchronize()
                 else:
-                    f.write(tensor_cupy)
+                    future = f.pwrite(
+                        tensor_cupy, task_size=tensor_cupy.nbytes
+                    )
+                    future.get()
 
         except Exception as e:
             logger.critical(f"Error in saving tensor to path {path}: {e}")
@@ -319,6 +356,10 @@ class KvikioIOAdapter(AdapterBase):
             "Kvikio Saved tensor"
             f" {get_oneline_str(tensor_cupy, verbose_only=True)} ({TensorEqID.from_tensor(tensor)})"
         )
+
+        if not self.is_async:
+            with self.lock:
+                self.end_timestamp.append(time.time())
 
     def load_tensor(
         self,
@@ -341,11 +382,14 @@ class KvikioIOAdapter(AdapterBase):
         tensor = torch.empty(shape, dtype=dtype, device=device)
         # tensor_cupy = cupy.asarray(tensor)
 
-        with self.lock:
-            load_stream = self.streams[self.current_stream_idx]
-            self.current_stream_idx = (self.current_stream_idx + 1) % len(
-                self.streams
-            )
+        if self.is_async:
+            assert self.streams is not None
+            assert self.current_stream_idx is not None
+            with self.lock:
+                load_stream = self.streams[self.current_stream_idx]
+                self.current_stream_idx = (self.current_stream_idx + 1) % len(
+                    self.streams
+                )
 
         try:
             with kvikio.CuFile(path, "r+") as f:
@@ -358,7 +402,11 @@ class KvikioIOAdapter(AdapterBase):
                     event.record(load_stream)
                     event.synchronize()
                 else:
-                    f.read(tensor)
+                    future = f.pread(
+                        tensor,
+                        task_size=tensor.numel() * tensor.element_size(),
+                    )
+                    future.get()
         except Exception as e:
             logger.critical(f"Error in loading tensor from path {path}: {e}")
 
@@ -472,7 +520,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
                 (path, tensor.shape, tensor.dtype, tensor.device)
             ] = new_tensor
 
-            logger.error(
+            logger.info(
                 f"Main Memory Saved tensor {TensorEqID.from_tensor(tensor)} to"
                 f" {(path, tensor.shape, tensor.dtype, tensor.device)}"
             )
@@ -642,6 +690,10 @@ class RevolverIOAdapter(AdapterBase):
     def __init__(self, adapters: list[KvikioIOAdapter | Any]):
         super().__init__()
         self.adapters = adapters
+        for adapter in self.adapters:
+            assert not isinstance(
+                adapter, RevolverIOAdapter
+            ), "RevolverIOAdapter cannot contain RevolverIOAdapter"
         self.storage_adapters_id = 0
 
     def create_new_filename(
