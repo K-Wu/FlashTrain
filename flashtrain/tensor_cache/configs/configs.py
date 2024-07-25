@@ -6,6 +6,7 @@ from ..adapters import (
     RevolverIOAdapter,
 )
 import torch
+import kvikio.defaults
 
 
 IMPACT_HOSTNAMES = {"bafs-01", "kwu-csl227-99-CEntosREfugee"}
@@ -20,7 +21,14 @@ HOSTNAMES_TO_CONFIGS = {
                         "path": "/mnt/md2/kunwu2/FlashTrain_temp/",
                         "is_async": False,
                     },
-                )
+                ),
+                # (
+                #     KvikioIOAdapter,
+                #     {
+                #         "path": "/mnt/md4/kunwu2/FlashTrain_temp/",
+                #         "is_async": False,
+                #     },
+                # )
             ],  # Rank 0
             [
                 (
@@ -29,7 +37,14 @@ HOSTNAMES_TO_CONFIGS = {
                         "path": "/mnt/md3/kunwu2/FlashTrain_temp/",
                         "is_async": False,
                     },
-                )
+                ),
+                # (
+                #     KvikioIOAdapter,
+                #     {
+                #         "path": "/mnt/md5/kunwu2/FlashTrain_temp/",
+                #         "is_async": False,
+                #     },
+                # )
             ],  # Rank 1
         ],
     },
@@ -74,8 +89,16 @@ def get_adapter():
     logger.info(f"Getting adapters for hostname {hostname} and rank {rank}")
     class_and_kwargs = HOSTNAMES_TO_CONFIGS[hostname]["adapter"][rank]
     if len(class_and_kwargs) == 1:
-        return class_and_kwargs[0][0](**class_and_kwargs[0][1])
+        results = class_and_kwargs[0][0](**class_and_kwargs[0][1])
     else:
-        return RevolverIOAdapter(
+        results = RevolverIOAdapter(
             adapters=[c[0](**c[1]) for c in class_and_kwargs]
         )
+
+    num_kvikio_threads = sum(
+        [8 for c in class_and_kwargs if c[0] == KvikioIOAdapter]
+    )
+    if num_kvikio_threads > 0:
+        kvikio.defaults.num_threads_reset(num_kvikio_threads)
+        kvikio.defaults.task_size_reset(67108864)
+    return results
