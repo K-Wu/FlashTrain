@@ -18,10 +18,9 @@ std::set<void*> registered_buffers;
 extern "C" {
 void set_verbose(bool v) { verbose = v; }
 void set_enable_cufile_registration(bool v) { enable_cufile_registration = v; }
-}
-
 int get_num_allocs() { return num_allocs; }
 int get_num_frees() { return num_frees; }
+}
 
 cudaError_t (*lcudaMalloc)(void**, size_t);
 CUfileError_t (*lcuFileBufRegister)(const void*, size_t, int);
@@ -64,8 +63,8 @@ cudaError_t cudaFree(void* devPtr) {
   }
 
   num_frees++;
-  if (verbose) printf("Deregistering buffer %p\n", devPtr);
   if (registered_buffers.count(devPtr)) {
+    if (verbose) printf("Deregistering buffer %p\n", devPtr);
     CUfileError_t cuerr = lcuFileBufDeregister(devPtr);
     registered_buffers.erase(devPtr);
     if (cuerr.err != CU_FILE_SUCCESS) {
