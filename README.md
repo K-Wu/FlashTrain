@@ -57,16 +57,14 @@ Go to third_party/Megatron-DeepSpeed and execute the following command.
 pip install .
 ```
 
-### Install RMM and then Build Memory Allocator
+### Building the Cufile Malloc Hook and Use It
+We created a simple cuda malloc hook that registers every allocated memory to cuFile in order to get the optimized pinned gpu memory transfer performance without the need to make a custom PyTorch allocator or alternation to the PyTorch runtime binary. Please build it by executing the `flashtrain/malloc_hook/make.sh`.
 
-Follow the instruction at https://github.com/rapidsai/rmm to install librmm and rmm from source. This is a very easy way to get the dependencies installed.
+You will need to modify the following code to use the actual location of the built `hook.so`
 
-And then execute the following in flashtrain/cuda_registered_allocator.
+`LD_PRELOAD` path in custom scripts such as `third_party/Megatron-DeepSpeed/examples/pretrain_bert_distributed.sh`.
 
-```
-mkdir build && cd build
-rmm_DIR=/home/kunwu2/rmm/install/lib/cmake/rmm/ fmt_DIR=/home/kunwu2/rmm/install/lib/cmake/fmt spdlog_DIR=/home/kunwu2/rmm/install/lib/cmake/spdlog nvtx3_DIR=/home/kunwu2/rmm/install/lib/cmake/nvtx3 Torch_DIR=`python -c 'import torch;print(torch.utils.cmake_prefix_path)'` cmake ..
-```
+The hard-coded `ctypes.CDLL` path in `flashtrain/tensor_cache/__init__.py`
 
 ### Install Transformer-Engine (Optional)
 ```

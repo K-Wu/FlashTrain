@@ -1,13 +1,13 @@
-# Usage: LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so python /home/kunwu2/FlashTrain / flashtrain / tests / test_malloc_hook.py
+"""
+Usage: LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so python /home/kunwu2/FlashTrain/flashtrain/tests/test_malloc_hook.py
+"""
 import torch
 
 print("Loading hook.so")
-import ctypes
+import flashtrain.tensor_cache
 
-libcuda_hook = ctypes.CDLL(
-    "/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so",
-    mode=ctypes.RTLD_GLOBAL,
-)
+flashtrain.tensor_cache.init_cufile_malloc_hook()
+libcuda_hook = flashtrain.tensor_cache.get_cufile_malloc_hook()
 libcuda_hook.set_verbose(True)
 libcuda_hook.set_enable_cufile_registration(True)
 torch.randn(15).cuda()
