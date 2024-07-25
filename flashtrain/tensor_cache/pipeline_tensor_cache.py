@@ -148,7 +148,7 @@ class PipelineTensorCache:
                 self.tensor_caches[
                     self.current_microbatch_idx
                 ].offloading_disabled = True
-                logger.critical(
+                logger.error(
                     get_oneline_str(
                         "PTC OFFLOADING DISABLED!!!", m._get_name()
                     )
@@ -187,7 +187,7 @@ class PipelineTensorCache:
                     self.current_microbatch_idx
                 ].offloading_disabled
             ):
-                logger.critical(
+                logger.error(
                     get_oneline_str(
                         "PTC OFFLOADING DISABLED!!!",
                         m._get_name(),

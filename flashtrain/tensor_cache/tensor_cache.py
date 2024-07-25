@@ -15,7 +15,7 @@ from ..logger import logger, get_oneline_str
 from .utils import TensorEqID, del_dict_key_if_exists
 from dataclasses import dataclass
 import math
-from .adapters import AdapterBase
+from .adapters import AdapterBase, KvikioIOAdapter, RevolverIOAdapter
 from typing import Optional
 from .offload_engine import OffloadHost
 
@@ -457,7 +457,7 @@ class TensorCache:
                 self.saved_ignored_last_modules.add(m)
             else:
                 self.saved_forward_done_modules.append(m)
-        logger.error(
+        logger.warning(
             get_oneline_str(
                 "saved_ignored_last_modules", self.saved_ignored_last_modules
             )
@@ -474,7 +474,6 @@ class TensorCache:
             self.adaptive_keep_modules_data["all"][
                 "current_iter_compute_events"
             ][1].synchronize()
-            self.adaptive_keep_modules_data["all"]["current_iter_IO_events"][1]
             for event in self.adaptive_keep_modules_data["all"][
                 "current_iter_IO_events"
             ][1]:
@@ -485,13 +484,6 @@ class TensorCache:
                         len(
                             self.adaptive_keep_modules_data[key][
                                 "current_iter_compute_events"
-                            ]
-                        )
-                    ) == 2
-                    assert (
-                        len(
-                            self.adaptive_keep_modules_data[key][
-                                "current_iter_IO_events"
                             ]
                         )
                     ) == 2
@@ -509,33 +501,47 @@ class TensorCache:
                         self.adaptive_keep_modules_data[key][
                             "historical_IO_time"
                         ] = []
-                    if (
-                        "historical_first_IO_timestamp"
-                        not in self.adaptive_keep_modules_data[key]
-                    ):
-                        self.adaptive_keep_modules_data[key][
-                            "historical_first_IO_timestamp"
-                        ] = []
+
                     IO_time = []
-                    for event in self.adaptive_keep_modules_data[key][
+
+                    # Handling asynchronous IO case
+                    if (
                         "current_iter_IO_events"
-                    ][1]:
-                        IO_time.append(
+                        in self.adaptive_keep_modules_data[key]
+                    ):
+                        for idx_event, event in enumerate(
                             self.adaptive_keep_modules_data[key][
                                 "current_iter_IO_events"
-                            ][0].elapsed_time(event)
-                        )
-                    self.adaptive_keep_modules_data[key][
-                        "historical_first_IO_timestamp"
-                    ].append(
-                        self.adaptive_keep_modules_data[key][
-                            "current_iter_compute_events"
-                        ][0].elapsed_time(
-                            self.adaptive_keep_modules_data[key][
-                                "current_iter_IO_events"
-                            ][0]
-                        )
-                    )
+                            ][1]
+                        ):
+                            IO_time.append(
+                                self.adaptive_keep_modules_data[key][
+                                    "current_iter_IO_events"
+                                ][0][idx_event].elapsed_time(event)
+                            )
+
+                    # Handling synchronous adapter case
+                    if isinstance(
+                        self.offloader.engine.adapter, RevolverIOAdapter
+                    ):
+                        adapters = self.offloader.engine.adapter.adapters
+                    else:
+                        adapters = [self.offloader.engine.adapter]
+                    # Handle KvikioIOAdapter is_async False case
+                    for adapter in adapters:
+                        if isinstance(adapter, KvikioIOAdapter) and (
+                            not adapter.is_async
+                        ):
+                            self.offloader.wait_for_storing_queue()
+                            for idx_ts, ts in enumerate(adapter.end_timestamp):
+                                # Convert to milliseconds
+                                IO_time.append(
+                                    1000
+                                    * (ts - adapter.start_timestamp[idx_ts])
+                                )
+                        adapter.start_timestamp.clear()
+                        adapter.end_timestamp.clear()
+
                     self.adaptive_keep_modules_data[key][
                         "historical_IO_time"
                     ].append(max(IO_time))
@@ -589,10 +595,7 @@ class TensorCache:
                         "current_iter_events"
                     ]
 
-            logger.info(
-                f"Adaptive keep profiling: {self.adaptive_keep_modules_data}"
-            )
-            logger.error(
+            logger.warning(
                 f"Adaptive keep profiling: {self.adaptive_keep_modules_data}"
             )
         if self.enable_activation_context_recording:
@@ -669,15 +672,23 @@ class TensorCache:
                 "current_iter_compute_events"
             ].append(event)
 
-            self.adaptive_keep_modules_data["all"][
-                "current_iter_IO_events"
-            ].append([])
-            for stream in self.offloader.engine.adapter.streams:
-                event = torch.cuda.Event(enable_timing=True)
-                event.record(stream=stream)
-                self.adaptive_keep_modules_data["all"][
-                    "current_iter_IO_events"
-                ][1].append(event)
+            if isinstance(self.offloader.engine.adapter, RevolverIOAdapter):
+                adapters = self.offloader.engine.adapter.adapters
+            else:
+                adapters = [self.offloader.engine.adapter]
+            # Handle KvikioIOAdapter is_async False case
+            for adapter in adapters:
+                if isinstance(adapter, KvikioIOAdapter) and (
+                    not adapter.is_async
+                ):
+                    pass
+                else:
+                    for stream in self.offloader.engine.adapter.streams:
+                        event = torch.cuda.Event(enable_timing=True)
+                        event.record(stream=stream)
+                        self.adaptive_keep_modules_data["all"][
+                            "current_iter_IO_events"
+                        ][1].append(event)
 
         if self.enable_activation_context_recording:
             self._update_current_activation_context_in_forward()
@@ -809,8 +820,8 @@ class TensorCache:
                     self.current_forward_module_scope_stack[-1],
                     ActivationContext,
                 ):
-                    logger.critical(self.current_forward_module_scope_stack)
-                    logger.critical(self.current_activation_context)
+                    logger.info(self.current_forward_module_scope_stack)
+                    logger.info(self.current_activation_context)
                 assert not isinstance(
                     self.current_forward_module_scope_stack[-1],
                     ActivationContext,
@@ -960,7 +971,7 @@ class TensorCache:
 
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
-        def forward_pre_hook(m: torch.nn.Module, inputs) -> None:
+        def forward_pre_hook(m: torch.nn.Module, input) -> None:
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
@@ -997,17 +1008,8 @@ class TensorCache:
                 f" Linear: {'Linear' in str(m._get_name())}. Current"
                 f" activation context {self.current_activation_context}."
             )
-            logger.error(
-                f"Forward pre hook for {get_oneline_str(m._get_name())}, is"
-                f" Linear: {'Linear' in str(m._get_name())}. Current"
-                f" activation context {self.current_activation_context}."
-            )
             if self.current_backward_activation_context is not None:
                 logger.info(
-                    "Current backward activation context"
-                    f" {self.current_backward_activation_context}"
-                )
-                logger.error(
                     "Current backward activation context"
                     f" {self.current_backward_activation_context}"
                 )
@@ -1093,7 +1095,7 @@ class TensorCache:
         return forward_pre_hook
 
     def get_forward_hook(self) -> Callable[..., None]:
-        def forward_hook(m, inputs, outputs) -> None:
+        def forward_hook(m, input, output) -> None:
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     if (
@@ -1119,9 +1121,6 @@ class TensorCache:
                     self._update_current_activation_context_in_forward()
 
             logger.info(
-                f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
-            )
-            logger.error(
                 f"Forward hook for {get_oneline_str(m._get_name())}({id(m)})"
             )
             # The runtime has finished the forward logic within module m.
@@ -1441,12 +1440,35 @@ class TensorCache:
                             event.record(stream=torch.cuda.current_stream())
                             self.adaptive_keep_modules_data["all"][
                                 "current_iter_IO_events"
-                            ] = [event]
+                            ] = [[], []]
+
+                            if isinstance(
+                                self.offloader.engine.adapter,
+                                RevolverIOAdapter,
+                            ):
+                                adapters = (
+                                    self.offloader.engine.adapter.adapters
+                                )
+                            else:
+                                adapters = [self.offloader.engine.adapter]
+                            for adapter in adapters:
+                                if isinstance(adapter, KvikioIOAdapter) and (
+                                    not adapter.is_async
+                                ):
+                                    pass
+                                else:
+                                    for (
+                                        stream
+                                    ) in self.offloader.engine.adapter.streams:
+                                        event = torch.cuda.Event(
+                                            enable_timing=True
+                                        )
+                                        event.record(stream=stream)
+                                        self.adaptive_keep_modules_data["all"][
+                                            "current_iter_IO_events"
+                                        ][0].append(event)
 
                     logger.info(
-                        f"Packing {tensor_id}, size {math.prod(tensor.size())}"
-                    )
-                    logger.error(
                         f"Packing {tensor_id}, size {math.prod(tensor.size())}"
                     )
                     self.offloader.add_tensor_to_store(
@@ -1492,11 +1514,6 @@ class TensorCache:
                         " recomputing, CPU tensor, small tensor, "
                         f" {TensorEqID.from_tensor(tensor_id_or_tensor, self.lock)}"
                     )
-                    logger.error(
-                        "Tensor cache skips unpacking, due to activation"
-                        " recomputing, CPU tensor, small tensor, etc."
-                        f" {TensorEqID.from_tensor(tensor_id_or_tensor, self.lock)}"
-                    )
                 return tensor_id_or_tensor
             else:
                 # The argument is TensorEqID
@@ -1530,7 +1547,7 @@ class TensorCache:
         3) unset self.current_in_reevaluator and self.current_reevaluator_context.
         """
         with self.reevaluator_lock:
-            logger.critical("DOING REEVALUATION!!!")
+            logger.error("DOING REEVALUATION!!!")
             self.current_in_reevaluator = True
             self.current_reevaluator_context = activation_context
             self.module_to_reevaluate_data[activation_context][
@@ -1573,7 +1590,7 @@ class TensorCache:
                         ].keys()
                     )
                 for tensor_id in tensor_ids:
-                    logger.error(
+                    logger.info(
                         f"Removing tensor from tensor cache {tensor_id} for"
                         f" module {module_id}. Modules to clear"
                         f" {self.backward_done_modules_with_cache_to_clear}"

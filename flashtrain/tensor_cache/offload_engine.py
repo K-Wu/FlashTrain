@@ -1,7 +1,14 @@
 import concurrent.futures
 from .utils import TensorEqID, del_dict_key_if_exists, thread_wrapped_func
 import torch
-from .adapters import AdapterBase, TorchBuiltinIOAdapter
+from .adapters import (
+    AdapterBase,
+    TorchBuiltinIOAdapter,
+    KvikioIOAdapter,
+    RevolverIOAdapter,
+    PeakTrackNoIOLossyAdapter,
+)
+import kvikio.defaults
 import threading
 import weakref
 from ..logger import logger, get_oneline_str
@@ -9,6 +16,7 @@ import logging
 import torch.multiprocessing as mp
 from enum import Enum
 from abc import ABCMeta, abstractmethod
+from typing import Optional
 
 
 class OffloadEngineBase(metaclass=ABCMeta):
@@ -43,6 +51,14 @@ class OffloadEngineBase(metaclass=ABCMeta):
 
     @abstractmethod
     def print_loaded_tensors(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def switch_to_peak_track_adapter(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def switch_to_original_adapter(self):
         raise NotImplementedError
 
 
@@ -84,6 +100,14 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         # Set the log level as the one passed in because this class may be instantiated in a different process.
         logger.setLevel(log_level)
 
+    def switch_to_peak_track_adapter(self):
+        self.original_adapter = self.adapter
+        self.adapter = PeakTrackNoIOLossyAdapter()
+
+    def switch_to_original_adapter(self):
+        self.adapter = self.original_adapter
+        del self.original_adapter
+
     def __del__(self):
         # This function is only triggered when the reference count of the object is zero. In this case, we need to shutdown the executor.
         self.executor.shutdown()
@@ -118,8 +142,8 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         tensor_being_stored = [_ for _ in self.tensor_being_stored.values()]
         results = concurrent.futures.wait(tensor_being_stored)
         if len(self.tensor_being_stored) > 0:
-            logger.critical(results)
-            logger.critical(self.tensor_being_stored)
+            logger.error(results)
+            logger.error(self.tensor_being_stored)
         assert len(self.tensor_being_stored) == 0
 
     def wait_for_loading_queue(self) -> None:
@@ -236,6 +260,8 @@ class CommandType(Enum):
     WAIT_FOR_LOADING_QUEUE = 5
     TERMINATE = 6
     PRINT_LOADED_TENSORS = 7
+    SWITCH_TO_PEAK_TRACK_ADAPTER = 8
+    SWITCH_TO_ORIGINAL_ADAPTER = 9
 
 
 # @thread_wrapped_func
@@ -277,6 +303,10 @@ def engine_main_loop(
             case CommandType.PRINT_LOADED_TENSORS:
                 engine.print_loaded_tensors()
                 result_queue.put("Done")
+            case CommandType.SWITCH_TO_PEAK_TRACK_ADAPTER:
+                engine.switch_to_peak_track_adapter()
+            case CommandType.SWITCH_TO_ORIGINAL_ADAPTER:
+                engine.switch_to_original_adapter()
             case CommandType.TERMINATE:
                 break
             case _:
@@ -370,6 +400,14 @@ class ProcessOffloadEngine(OffloadEngineBase):
         self.command_queue.put((CommandType.PRINT_LOADED_TENSORS, ()))
         self.result_queue.get()
 
+    def switch_to_peak_track_adapter(self):
+        self.command_queue.put((CommandType.SWITCH_TO_PEAK_TRACK_ADAPTER, ()))
+        self.result_queue.get()
+
+    def switch_to_original_adapter(self):
+        self.command_queue.put((CommandType.SWITCH_TO_ORIGINAL_ADAPTER, ()))
+        self.result_queue.get()
+
 
 class OffloadHost:
     # This object stores 1) tensors that bypass offloading because a tensor shall not be passed to another process and then back to the original process, and 2) tensors in self.engine.tensor_id_to_loaded_tensor and once returned by self.get_loaded_tensor().
@@ -387,12 +425,35 @@ class OffloadHost:
     def __init__(
         self,
         engine_type: EngineType,
-        adapter: AdapterBase | None,
-        max_workers: int = 4,
+        adapter: Optional[AdapterBase],
+        max_workers: Optional[int] = None,
     ) -> None:
         self.tensor_id_to_tensor_to_store = {}
         self.tensor_id_to_loaded_tensor = {}
         self.lock = threading.Lock()
+        logger.critical(f"Adapter is {adapter}")
+        if isinstance(adapter, KvikioIOAdapter) or (
+            isinstance(adapter, RevolverIOAdapter)
+            and isinstance(adapter.adapters[0], KvikioIOAdapter)
+        ):
+            if (
+                max_workers is not None
+                and max_workers != kvikio.defaults.get_num_threads()
+            ):
+                logger.error(
+                    f"OffloadEngine's worker num is set to {max_workers}, but"
+                    " the number of kvikio threads is"
+                    f" {kvikio.defaults.get_num_threads()}."
+                )
+
+        if max_workers is None:
+            if isinstance(adapter, KvikioIOAdapter) or (
+                isinstance(adapter, RevolverIOAdapter)
+                and isinstance(adapter.adapters[0], KvikioIOAdapter)
+            ):
+                max_workers = kvikio.defaults.get_num_threads()
+            else:
+                max_workers = 4
 
         if engine_type == self.EngineType.PROCESS:
             self.engine = ProcessOffloadEngine(
@@ -413,7 +474,7 @@ class OffloadHost:
             if tensor_id in self.tensor_id_to_tensor_to_store:
                 # The tensor is still in memory and being stored. Return the tensor directly.
                 tensor = self.tensor_id_to_tensor_to_store[tensor_id]()
-                logger.critical(f"Get tensor {tensor_id} from memory")
+                logger.info(f"Get tensor {tensor_id} from memory")
                 if not tensor is None:
                     if not tensor_id in self.tensor_id_to_loaded_tensor:
                         self.tensor_id_to_loaded_tensor[tensor_id] = tensor
@@ -447,17 +508,13 @@ class OffloadHost:
         process_descriptor: str,
     ) -> None:
         if tensor_id not in self.tensor_id_to_tensor_to_store:
-            logger.error(f"Adding tensor {tensor_id} into tensor to store")
-            logger.debug(f"Adding tensor {tensor_id} into tensor to store")
+            logger.info(f"Adding tensor {tensor_id} into tensor to store")
             self.engine.add_tensor_to_store(
                 tensor_id, tensor, process_descriptor
             )
             self.tensor_id_to_tensor_to_store[tensor_id] = weakref.ref(tensor)
         else:
-            logger.error(
-                f"Tensor {tensor_id} already exists in tensor to store"
-            )
-            logger.debug(
+            logger.info(
                 f"Tensor {tensor_id} already exists in tensor to store"
             )
 
