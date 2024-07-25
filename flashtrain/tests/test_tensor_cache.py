@@ -309,7 +309,7 @@ class SimpleModelTestWithCache(TestCase):
                     )
                 else:
                     assert isinstance(tensor_cache, TC.TensorCache)
-                    tensor_cache.wait_forward()
+                    tensor_cache.finish_up_forward()
                     tensor_cache.set_backward()
 
                 logger.info("Iterations forward end.")
