@@ -6,7 +6,7 @@ The Megatron-DeepSpeed activation checkpointing is customized so that when DeepS
 ## Usage
 In models provided by Megatron-Deepspeed, when the following option is enabled, activation checkpointing is enabled: `--deepspeed-activation-checkpointing`. We don't need to use `--checkpoint-activations` because all logic refer to it has a superceding equivalent flag check `--recompute-granularity full`.
 
-Do not specify "--checkpoint-activations" when "--recompute-granularity" is "selective".
+Do not specify `--checkpoint-activations` when `--recompute-granularity` is `selective`.
 
 To enable activation checkpointing, one need to either set `--recompute-granularity` to a value other than `None` or set `--recompute-non-linear-layer-in-mlp` to `True`. The former option enable activation checkpointing for the MLP block and/or the attention block. The latter option enable activation checkpointing for the non-linear layer in the core attention block and is specifically provided to reduce excessive tensor offloading.
 
@@ -14,3 +14,13 @@ To enable activation checkpointing, one need to either set `--recompute-granular
 
 
 For GPTModelPipe in gpt_model.py only, `--recompute-method` has to be `uniform` when  `--recompute-granularity` is `full`.
+
+## Experiments
+Megatron models, `bert_model.py` and `t5_model.py` supports `--recompute-granularity full --recompute-num-layers X --recompute-method block`. In this case, the first X layers will be recomputed layer-wise.
+
+DeepSpeed model, `gpt_model.py`, does not support `--recompute-method block`. We only do activation-enabled experiments on Bert and T5.
+
+### New features
+You may specify `--use-reevaluator` to use the reevaluator we introduced for activation checkpointing.
+
+We also enabled the combination of `--recompute-num-layers X --recompute-method block` for selective recomputation. In this case, only the first few layers will be recomputed.

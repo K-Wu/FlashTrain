@@ -14,6 +14,8 @@ from megatron.core.tensor_parallel.utils import (
 from megatron.core.tensor_parallel.random import (
     get_cuda_rng_tracker,
     _set_cuda_rng_state,
+    extract_tensors,
+    merge_tensors,
 )
 
 import megatron.core.tensor_parallel.random as random
@@ -123,7 +125,16 @@ class ReevaluatorFunction(torch.autograd.Function):
             )
 
         # Store everything.
-        ctx.save_for_backward(*args)
+        def save_args_for_backward(*all_args):
+            # From deepspeed/runtime/activation_checkpointing/checkpointing.py
+            tensor_args, non_tensor_args, tensor_flags = extract_tensors(
+                all_objects=all_args
+            )
+            ctx.save_for_backward(*tensor_args)
+            ctx.non_tensor_args = non_tensor_args
+            ctx.tensor_flags = tensor_flags
+
+        save_args_for_backward(*args)
 
         # Register reevaluator and bookkeep output tensor_ids in tensor_cache
         # Based on all usage in Megatron_Deepspeed, we may assume the variable `outputs` in both forward() and reevaluate_forward_func() is either a tensor or a tuple of tensors
@@ -135,7 +146,14 @@ class ReevaluatorFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *args):
-        inputs = ctx.saved_tensors
+        inputs_tensors = ctx.saved_tensors
+        inputs = merge_tensors(
+            tensor_objects=inputs_tensors,
+            non_tensor_objects=ctx.non_tensor_args,
+            tensor_flags=ctx.tensor_flags,
+        )
+        ctx.non_tensor_args = None
+        ctx.tensor_flags = None
         detached_inputs = detach_variable(inputs)
         # Get outputs from the tensor_cache
         outputs = get_tensor_cache().get_reevaluated_output(
@@ -147,8 +165,8 @@ class ReevaluatorFunction(torch.autograd.Function):
 
         grads = tuple(
             inp.grad if isinstance(inp, torch.Tensor) else inp
-            for inp in detached_inputs
-        )
+            for inp in detached_inputs[: len(inputs_tensors)]
+        ) + (None,) * (len(inputs) - len(inputs_tensors))
         return (None, None) + grads
 
 
