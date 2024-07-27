@@ -1,6 +1,8 @@
 import torch
 from .tensor_cache import (
     TensorCache,
+)
+from .profiler_tree import (
     ModuleReentrantContext,
     ActivationContext,
 )
