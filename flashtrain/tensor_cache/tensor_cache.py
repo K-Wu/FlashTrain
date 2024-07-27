@@ -13,7 +13,11 @@ import threading
 import traceback
 from ..logger import logger, get_oneline_str
 from .utils import TensorEqID, del_dict_key_if_exists
-from .profiler_tree import ActivationContext, ModuleReentrantContext
+from .profiler_tree import (
+    ActivationContext,
+    ModuleReentrantContext,
+    SavedActivationContext,
+)
 import math
 from .adapters import AdapterBase, KvikioIOAdapter, RevolverIOAdapter
 from typing import Optional
@@ -170,8 +174,10 @@ class TensorCache:
     adaptive_keep_layer_names_in_track: set[str]
     # self.adaptive_keep_modules_data = {'all':{"historical_compute_time": list[float, ...], "historical_IO_time": list[float, ...], "current_iter_compute_events":list[torch.cuda.Event,...], "current_iter_IO_events":list[torch.cuda.Event,...]},
     #                                    ModuleReentrantContext:{"historical_time": list[float, ...], "current_iter_events":list[torch.cuda.Event,...],"index": int, "packed_data_size": int, "each_packed_data_size": list[int]}}
-    adaptive_keep_modules_data: dict[ModuleReentrantContext | str, dict]
-    num_kept_layers: int | None
+    adaptive_keep_modules_data: dict[
+        SavedActivationContext | ModuleReentrantContext | str, dict
+    ]
+    kept_layers_beginning: SavedActivationContext | ModuleReentrantContext | None
 
     # Measured GPU memory usage by activation
     measured_activation_gpu_memory_size: int
@@ -193,6 +199,7 @@ class TensorCache:
     current_activation_context: ActivationContext | None
     current_reevaluator_context: ActivationContext | None
     activation_checkpoints: list[ActivationContext]
+    activation_checkpoints_seqid: dict[ActivationContext, int]
     # activation_checkpoint_to_module_id: dict[
     #     ActivationContext, set[ModuleReentrantContext]
     # ]
@@ -209,26 +216,26 @@ class TensorCache:
     forward_modules_whole_stack: list[
         list[ModuleReentrantContext | ActivationContext]
     ]
-    last_module_in_forward: ModuleReentrantContext | ActivationContext | None
-    last_module_in_backward: ModuleReentrantContext | ActivationContext | None
+    # last_module_in_forward: ModuleReentrantContext | SavedActivationContext | None
+    # last_module_in_backward: ModuleReentrantContext | SavedActivationContext | None
     # The last module in the forward pass is kept in the GPU memory if the next stage is the back propagation of the same microbatch. If the current backward propagation stage is about to finish, the last module in forward pass in the next microbatch's backward propagation is prefetched in the GPU memory.
     saved_forward_done_modules: (
-        list[ModuleReentrantContext | ActivationContext] | None
+        list[ModuleReentrantContext | SavedActivationContext] | None
     )
     # The last two (by default) modules are kept in the GPU memory and never offloaded or reloaded/prefetched, i.e., ModelLoss and ModelLMHead.
     saved_ignored_last_modules: (
-        set[ModuleReentrantContext | ActivationContext] | None
+        set[ModuleReentrantContext | SavedActivationContext] | None
     )
+    next_module_to_previous_module: dict[
+        ModuleReentrantContext | SavedActivationContext,
+        ModuleReentrantContext | SavedActivationContext,
+    ]
     backward_done_modules: set[ModuleReentrantContext | ActivationContext]
     backward_done_modules_with_cache_to_clear: set[
         ModuleReentrantContext | ActivationContext
     ]
     delayed_backward_done_modules_with_cache_to_clear: set[
         ModuleReentrantContext | ActivationContext
-    ]
-    next_module_to_previous_module: dict[
-        ModuleReentrantContext | ActivationContext,
-        ModuleReentrantContext | ActivationContext,
     ]
 
     offloader: OffloadHost
@@ -417,7 +424,7 @@ class TensorCache:
             adaptive_keep_layer_names_in_track
         )
         self.adaptive_keep_modules_data = {}
-        self.num_kept_layers = None
+        self.kept_layers_beginning = None
 
         self.measured_activation_gpu_memory_size = 0
 
@@ -429,6 +436,7 @@ class TensorCache:
         self.current_activation_context = None
         self.current_reevaluator_context = None
         self.activation_checkpoints = []
+        self.activation_checkpoints_seqid = {}
         # self.activation_checkpoint_to_module_id = {}
         self.previous_module_to_activation_context = {}
         self.current_forward_module_scope_stack = []
@@ -505,6 +513,13 @@ class TensorCache:
         self.saved_forward_done_modules = []
         self.saved_ignored_last_modules = set()
         for idx_m, m in enumerate(self.forward_done_modules):
+            if isinstance(m, ActivationContext):
+                to_save = SavedActivationContext(
+                    seq_id=self.activation_checkpoints_seqid[m]
+                )
+            else:
+                to_save = m
+
             # For names specified in self.ignored_module_recursively_names, if there is any such module to ignore in forward_modules_whole_stack[idx_m], then this module m should be ignored.
             # For example, we need to ignore the linear layer inside LMHead.
             # On the other hand, names specified self.ignored_module_names are only compared with m itself.
@@ -525,9 +540,9 @@ class TensorCache:
                     )
                 ]
             ):
-                self.saved_ignored_last_modules.add(m)
+                self.saved_ignored_last_modules.add(to_save)
             else:
-                self.saved_forward_done_modules.append(m)
+                self.saved_forward_done_modules.append(to_save)
         logger.warning(
             get_oneline_str(
                 "saved_ignored_last_modules", self.saved_ignored_last_modules
@@ -695,6 +710,7 @@ class TensorCache:
 
                 self.activation_checkpoint_counter = 0
                 self.activation_checkpoints.clear()
+                self.activation_checkpoints_seqid.clear()
                 # self.activation_checkpoint_to_module_id.clear()
                 self.previous_module_to_activation_context.clear()
         else:
@@ -832,6 +848,20 @@ class TensorCache:
         assert self.enable_activation_context_recording
         assert not self.current_in_backward
 
+        def bookkeep_activation_region_exit():
+            """Make activation region exit bookkeeping a function because it is used twice inside _update_current_activation_context_in_forward()."""
+            self.adaptive_profiling_record_scope_end(
+                self.current_forward_module_scope_stack[-1]
+            )
+            self.forward_done_modules.append(
+                self.current_forward_module_scope_stack[-1]
+            )
+            if self.saved_forward_done_modules is None:
+                self.forward_modules_whole_stack.append(
+                    self.current_forward_module_scope_stack.copy()
+                )
+            self.current_forward_module_scope_stack.pop()
+
         # Detecting if the activation checkpointing/reevaluator implementation
         # source file is in the traceback.
         # When exiting a checkpoint region in the forward_hook, this is still
@@ -878,6 +908,13 @@ class TensorCache:
                     return
             # Create entries in data members.
             self.activation_checkpoints.append(self.current_activation_context)
+            assert (
+                self.current_activation_context
+                not in self.activation_checkpoints_seqid
+            )
+            self.activation_checkpoints_seqid[
+                self.current_activation_context
+            ] = (len(self.activation_checkpoints) - 1)
             # self.activation_checkpoint_to_module_id[
             #     self.current_activation_context
             # ] = set()
@@ -900,14 +937,7 @@ class TensorCache:
                     ActivationContext,
                 ):
                     # We exit an activation checkpoint region.
-                    self.forward_done_modules.append(
-                        self.current_forward_module_scope_stack[-1]
-                    )
-                    if self.saved_forward_done_modules is None:
-                        self.forward_modules_whole_stack.append(
-                            self.current_forward_module_scope_stack.copy()
-                        )
-                    self.current_forward_module_scope_stack.pop()
+                    bookkeep_activation_region_exit()
                 if len(self.forward_done_modules) > 0:
                     previous_module = self.forward_done_modules[-1]
             assert (
@@ -927,20 +957,16 @@ class TensorCache:
             self.current_forward_module_scope_stack.append(
                 self.current_activation_context
             )
+            self.adaptive_profiling_record_scope_beginning(
+                self.current_activation_context, "ActivationContext"
+            )
         else:
             # We are currently not in an activation checkpoint region.
             logger.debug("Not in an activation checkpoint region")
             if self.current_activation_context is not None:
                 # We exit an activation checkpoint region.
                 self.current_activation_context = None
-                self.forward_done_modules.append(
-                    self.current_forward_module_scope_stack[-1]
-                )
-                if self.saved_forward_done_modules is None:
-                    self.forward_modules_whole_stack.append(
-                        self.current_forward_module_scope_stack.copy()
-                    )
-                self.current_forward_module_scope_stack.pop()
+                bookkeep_activation_region_exit()
 
     def _check_done_activation_context_in_backward(
         self, backward_pre_hook_target: torch.nn.Module | None
@@ -1007,6 +1033,10 @@ class TensorCache:
             module_to_prefetch = self.next_module_to_previous_module[
                 backward_pre_module
             ]
+            if isinstance(module_to_prefetch, SavedActivationContext):
+                module_to_prefetch = self.activation_checkpoints[
+                    module_to_prefetch.seq_id
+                ]
             if module_to_prefetch in self.module_id_to_tensor_ids:
                 logger.debug(
                     "Prefetching tensors in backward pre hook"
@@ -1039,7 +1069,18 @@ class TensorCache:
     def prefetch_last_module_in_forward_if_not_None(self):
         # Do the prefetch
         if self.saved_forward_done_modules is not None:
-            self.prefetch_saved_tensors(self.saved_forward_done_modules[-1])
+            if isinstance(
+                self.saved_forward_done_modules[-1], SavedActivationContext
+            ):
+                self.prefetch_saved_tensors(
+                    self.activation_checkpoints[
+                        self.saved_forward_done_modules[-1].seq_id
+                    ]
+                )
+            else:
+                self.prefetch_saved_tensors(
+                    self.saved_forward_done_modules[-1]
+                )
 
     def is_last_module_in_backward(self, m: torch.nn.Module) -> bool:
         if self.saved_forward_done_modules is None:
@@ -1052,6 +1093,63 @@ class TensorCache:
             )
             == self.saved_forward_done_modules[0]
         )
+
+    def adaptive_profiling_record_scope_end(
+        self, scope: ModuleReentrantContext | ActivationContext
+    ):
+        if isinstance(scope, ActivationContext):
+            scope = SavedActivationContext(
+                seq_id=self.activation_checkpoints_seqid[scope]
+            )
+        if (
+            self.adaptive_keep_profiling_begin_iter
+            <= self.current_forward_iter
+            < self.adaptive_keep_profiling_end_iter
+        ):
+            # Profile the timing of this module if in the specified iteration range
+            event = torch.cuda.Event(enable_timing=True)
+            event.record(stream=torch.cuda.current_stream())
+            self.adaptive_keep_modules_data[scope][
+                "current_iter_events"
+            ].append(event)
+
+    def adaptive_profiling_record_scope_beginning(
+        self, scope: ModuleReentrantContext | ActivationContext, name: str
+    ):
+        if isinstance(scope, ActivationContext):
+            scope = SavedActivationContext(
+                seq_id=self.activation_checkpoints_seqid[scope]
+            )
+        # In the first forward iteration, record the module if self.adaptive_keep and module name is in self.adaptive_keep_layer_names_in_track
+        if self.current_forward_iter == 0:
+            self.adaptive_keep_modules_data[scope] = dict()
+            self.adaptive_keep_modules_data[scope]["name"] = name
+            self.adaptive_keep_modules_data[scope]["index"] = len(
+                self.adaptive_keep_modules_data
+            )
+
+        # Profile the timing of this module if in the specified iteration range
+        if (
+            self.adaptive_keep_profiling_begin_iter
+            <= self.current_forward_iter
+            < self.adaptive_keep_profiling_end_iter
+        ):
+            event = torch.cuda.Event(enable_timing=True)
+            event.record(stream=torch.cuda.current_stream())
+            self.adaptive_keep_modules_data[scope]["current_iter_events"] = [
+                event
+            ]
+
+            # Profile the very beginning of the forward pass
+            if "all" not in self.adaptive_keep_modules_data:
+                self.adaptive_keep_modules_data["all"] = dict()
+            if (
+                "current_iter_compute_events"
+                not in self.adaptive_keep_modules_data["all"]
+            ):
+                self.adaptive_keep_modules_data["all"][
+                    "current_iter_compute_events"
+                ] = [event]
 
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
@@ -1122,40 +1220,10 @@ class TensorCache:
 
             if self.adaptive_keep and (not self.current_in_backward):
                 if m._get_name() in self.adaptive_keep_layer_names_in_track:
-                    # In the first forward iteration, record the module if self.adaptive_keep and module name is in self.adaptive_keep_layer_names_in_track
-                    if self.current_forward_iter == 0:
-                        self.adaptive_keep_modules_data[
-                            self.current_forward_module_scope_stack[-1]
-                        ] = dict()
-                        self.adaptive_keep_modules_data[
-                            self.current_forward_module_scope_stack[-1]
-                        ]["name"] = m._get_name()
-                        self.adaptive_keep_modules_data[
-                            self.current_forward_module_scope_stack[-1]
-                        ]["index"] = len(self.adaptive_keep_modules_data)
-
-                    # Profile the timing of this module if in the specified iteration range
-                    if (
-                        self.adaptive_keep_profiling_begin_iter
-                        <= self.current_forward_iter
-                        < self.adaptive_keep_profiling_end_iter
-                    ):
-                        event = torch.cuda.Event(enable_timing=True)
-                        event.record(stream=torch.cuda.current_stream())
-                        self.adaptive_keep_modules_data[
-                            self.current_forward_module_scope_stack[-1]
-                        ]["current_iter_events"] = [event]
-
-                        # Profile the very beginning of the forward pass
-                        if "all" not in self.adaptive_keep_modules_data:
-                            self.adaptive_keep_modules_data["all"] = dict()
-                        if (
-                            "current_iter_compute_events"
-                            not in self.adaptive_keep_modules_data["all"]
-                        ):
-                            self.adaptive_keep_modules_data["all"][
-                                "current_iter_compute_events"
-                            ] = [event]
+                    self.adaptive_profiling_record_scope_beginning(
+                        self.current_forward_module_scope_stack[-1],
+                        m._get_name(),
+                    )
 
             if (
                 self.current_forward_module_scope_stack[-1]
@@ -1220,18 +1288,15 @@ class TensorCache:
             self.forward_done_modules.append(
                 self.current_forward_module_scope_stack[-1]
             )
-            if self.adaptive_keep and (
-                self.adaptive_keep_profiling_begin_iter
-                <= self.current_forward_iter
-                < self.adaptive_keep_profiling_end_iter
+
+            if (
+                self.adaptive_keep
+                and m._get_name() in self.adaptive_keep_layer_names_in_track
             ):
-                # Profile the timing of this module if in the specified iteration range
-                if m._get_name() in self.adaptive_keep_layer_names_in_track:
-                    event = torch.cuda.Event(enable_timing=True)
-                    event.record(stream=torch.cuda.current_stream())
-                    self.adaptive_keep_modules_data[
-                        self.current_forward_module_scope_stack[-1]
-                    ]["current_iter_events"].append(event)
+                self.adaptive_profiling_record_scope_end(
+                    self.current_forward_module_scope_stack[-1]
+                )
+
             if self.saved_forward_done_modules is None:
                 self.forward_modules_whole_stack.append(
                     self.current_forward_module_scope_stack.copy()
@@ -1407,6 +1472,13 @@ class TensorCache:
                 current_scope = self.current_forward_module_scope_stack[-1]
             assert current_scope is not None
 
+            if isinstance(current_scope, ActivationContext):
+                current_scope_ = SavedActivationContext(
+                    seq_id=self.activation_checkpoints_seqid[current_scope]
+                )
+            else:
+                current_scope_ = current_scope
+
             # Skip parameters because they will stay in memory always.
             with self.lock:
                 # We need to ensure thread-safety.
@@ -1419,7 +1491,7 @@ class TensorCache:
 
                 if self.offloading_disabled or (
                     self.saved_ignored_last_modules is not None
-                    and current_scope in self.saved_ignored_last_modules
+                    and current_scope_ in self.saved_ignored_last_modules
                 ):
                     if self.saved_ignored_last_modules is not None:
                         logger.error(
@@ -1427,7 +1499,7 @@ class TensorCache:
                                 "OFFLOADING DISABLED!!!",
                                 self.offloading_disabled,
                                 self.saved_ignored_last_modules,
-                                current_scope,
+                                current_scope_,
                             )
                         )
 
