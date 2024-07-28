@@ -431,7 +431,7 @@ class OffloadHost:
         self.tensor_id_to_tensor_to_store = {}
         self.tensor_id_to_loaded_tensor = {}
         self.lock = threading.Lock()
-        logger.critical(f"Adapter is {adapter}")
+        logger.info(f"Adapter is {adapter}")
         if isinstance(adapter, KvikioIOAdapter) or (
             isinstance(adapter, RevolverIOAdapter)
             and isinstance(adapter.adapters[0], KvikioIOAdapter)

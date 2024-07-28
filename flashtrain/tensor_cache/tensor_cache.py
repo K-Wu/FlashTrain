@@ -450,6 +450,18 @@ class TensorCache:
             adaptive_keep_profiling_end_iter
         )
         self.current_forward_iter = 0
+        if self.adaptive_keep and 0 >= self.adaptive_keep_profiling_begin_iter:
+            if isinstance(self.offloader.engine.adapter, RevolverIOAdapter):
+                adapters = self.offloader.engine.adapter.adapters
+            else:
+                adapters = [self.offloader.engine.adapter]
+            # Handle KvikioIOAdapter is_async False case
+            for adapter in adapters:
+                if isinstance(adapter, KvikioIOAdapter) and (
+                    not adapter.is_async
+                ):
+                    adapter.is_being_profiled = True
+
         self.adaptive_keep_layer_first_level_name = (
             adaptive_keep_layer_first_level_name
         )
@@ -656,12 +668,14 @@ class TensorCache:
                             not adapter.is_async
                         ):
                             self.offloader.wait_for_storing_queue()
-                            for idx_ts, ts in enumerate(adapter.end_timestamp):
-                                # Convert to milliseconds
-                                IO_time.append(
-                                    1000
-                                    * (ts - adapter.start_timestamp[idx_ts])
+                            # Convert to milliseconds
+                            IO_time.append(
+                                1000
+                                * (
+                                    max(adapter.end_timestamp)
+                                    - min(adapter.start_timestamp)
                                 )
+                            )
                             adapter.start_timestamp.clear()
                             adapter.end_timestamp.clear()
 
@@ -718,9 +732,40 @@ class TensorCache:
                         "current_iter_events"
                     ]
 
-            logger.warning(
+            logger.critical(
                 f"Adaptive keep profiling: {self.adaptive_keep_modules_data}"
             )
+
+        if (
+            self.adaptive_keep
+            and self.current_forward_iter
+            == self.adaptive_keep_profiling_begin_iter - 1
+        ):
+            if isinstance(self.offloader.engine.adapter, RevolverIOAdapter):
+                adapters = self.offloader.engine.adapter.adapters
+            else:
+                adapters = [self.offloader.engine.adapter]
+            # Handle KvikioIOAdapter is_async False case
+            for adapter in adapters:
+                if isinstance(adapter, KvikioIOAdapter) and (
+                    not adapter.is_async
+                ):
+                    adapter.is_being_profiled = True
+        if (
+            self.adaptive_keep
+            and self.current_forward_iter
+            == self.adaptive_keep_profiling_end_iter - 1
+        ):
+            if isinstance(self.offloader.engine.adapter, RevolverIOAdapter):
+                adapters = self.offloader.engine.adapter.adapters
+            else:
+                adapters = [self.offloader.engine.adapter]
+            # Handle KvikioIOAdapter is_async False case
+            for adapter in adapters:
+                if isinstance(adapter, KvikioIOAdapter) and (
+                    not adapter.is_async
+                ):
+                    adapter.is_being_profiled = False
 
         if (
             self.adaptive_keep
@@ -734,7 +779,7 @@ class TensorCache:
                 self.adaptive_kept_layers_beginning = (
                     self.adaptive_kept_layers_beginning.scope
                 )
-            logger.warning(
+            logger.critical(
                 f"Adaptive keep: {self.adaptive_kept_layers_beginning}"
             )
 
@@ -808,7 +853,7 @@ class TensorCache:
             <= self.current_forward_iter
             < self.adaptive_keep_profiling_end_iter
         ):
-            logger.critical("Profiling the forward pass")
+            logger.info("Profiling the forward pass")
             event = torch.cuda.Event(enable_timing=True)
             event.record(stream=torch.cuda.current_stream())
             self.adaptive_keep_modules_data["all"][
@@ -833,7 +878,7 @@ class TensorCache:
                             "current_iter_IO_events"
                         ][1].append(event)
         else:
-            logger.critical("Not profiling the forward pass")
+            logger.info("Not profiling the forward pass")
 
         if self.enable_activation_context_recording:
             self._update_current_activation_context_in_forward()
@@ -1288,30 +1333,6 @@ class TensorCache:
                         m._get_name(),
                     )
 
-            if not self.current_in_backward:
-                if (
-                    self.adaptive_keep
-                    and self.adaptive_kept_layers_beginning is not None
-                ):
-                    if (
-                        self.current_forward_module_scope_stack[-1]
-                        == self.adaptive_kept_layers_beginning
-                    ):
-                        self.adaptive_kept_layers_beginning_is_passed = True
-                    if self.current_activation_context is not None:
-                        current_activation_context_ = SavedActivationContext(
-                            seq_id=self.activation_checkpoints_seqid[
-                                self.current_activation_context
-                            ]
-                        )
-                        if (
-                            current_activation_context_
-                            == self.adaptive_kept_layers_beginning
-                        ):
-                            self.adaptive_kept_layers_beginning_is_passed = (
-                                True
-                            )
-
             if (
                 self.current_forward_module_scope_stack[-1]
                 not in self.module_id_to_tensor_ids
@@ -1383,6 +1404,30 @@ class TensorCache:
                 self.adaptive_profiling_record_scope_end(
                     self.current_forward_module_scope_stack[-1]
                 )
+
+            if not self.current_in_backward:
+                if (
+                    self.adaptive_keep
+                    and self.adaptive_kept_layers_beginning is not None
+                ):
+                    if (
+                        self.current_forward_module_scope_stack[-1]
+                        == self.adaptive_kept_layers_beginning
+                    ):
+                        self.adaptive_kept_layers_beginning_is_passed = True
+                    if self.current_activation_context is not None:
+                        current_activation_context_ = SavedActivationContext(
+                            seq_id=self.activation_checkpoints_seqid[
+                                self.current_activation_context
+                            ]
+                        )
+                        if (
+                            current_activation_context_
+                            == self.adaptive_kept_layers_beginning
+                        ):
+                            self.adaptive_kept_layers_beginning_is_passed = (
+                                True
+                            )
 
             if self.saved_forward_done_modules is None:
                 self.forward_modules_whole_stack.append(

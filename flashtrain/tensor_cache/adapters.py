@@ -328,7 +328,8 @@ class KvikioIOAdapter(AdapterBase):
                 )
         else:
             with self.lock:
-                self.start_timestamp.append(time.time())
+                if self.is_being_profiled:
+                    self.start_timestamp.append(time.time())
 
         try:
             with kvikio.CuFile(path, "w") as f:
@@ -359,7 +360,8 @@ class KvikioIOAdapter(AdapterBase):
 
         if not self.is_async:
             with self.lock:
-                self.end_timestamp.append(time.time())
+                if self.is_being_profiled:
+                    self.end_timestamp.append(time.time())
 
     def load_tensor(
         self,
