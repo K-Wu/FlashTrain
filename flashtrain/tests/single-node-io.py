@@ -1,5 +1,3 @@
-# Adapted from /kvikio/python/benchmarks/single-node-io.py with parameterized task size
-# Example usage: python /home/kunwu2/kvikio/python/benchmarks/single-node-io.py -t 8 -d /mnt/md3/kunwu2/FlashTrain_temp/   --api cufile cufile-mfma cufile-mf cufile-ma
 # Copyright (c) 2021-2023, NVIDIA CORPORATION. All rights reserved.
 # See file LICENSE for terms.
 
@@ -19,6 +17,7 @@ from dask.utils import format_bytes, parse_bytes
 
 import kvikio
 import kvikio.defaults
+import concurrent.futures
 
 
 def get_zarr_compressors() -> Dict[str, Any]:
@@ -80,13 +79,16 @@ def run_cufile_multiple_files_multiple_arrays(args):
         start = clock()
         for array in arrays:
             kvikio.memory_register(array)
-        print(f"Register time: {clock() - start}")
+    time_after_register = clock()
+    if args.pre_register_buffer:
+        print(f"Register time: {time_after_register - start}")
 
     # Write
     files = [
         kvikio.CuFile(file_path % i, flags="w") for i in range(args.nthreads)
     ]
     t0 = clock()
+    print(f"File open time: {t0 - time_after_register}")
     futures = [f.pwrite(a, task_size=a.nbytes) for f, a in zip(files, arrays)]
     res = sum(f.get() for f in futures)
     del files
@@ -100,6 +102,65 @@ def run_cufile_multiple_files_multiple_arrays(args):
     t0 = clock()
     futures = [f.pread(a, task_size=a.nbytes) for f, a in zip(files, arrays)]
     res = sum(f.get() for f in futures)
+    del files
+    read_time = clock() - t0
+    assert res == args.nbytes
+
+    if args.pre_register_buffer:
+        start = clock()
+        for array in arrays:
+            kvikio.memory_deregister(array)
+        print(f"Deregister time: {clock() - start}")
+
+    return read_time, write_time
+
+
+def run_cufile_multiple_files_multiple_arrays_variant(args):
+    """One file and array per thread"""
+    args.nthreads *= 2
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.nthreads)
+
+    chunksize = args.nbytes // args.nthreads
+    assert (
+        args.nbytes % args.nthreads == 0
+    ), "--nbytes must be divisible by --nthreads"
+
+    # Create a file path and CuPy array per thread
+    file_path = str(args.dir / "cufile-p-%03d")
+    arrays = [create_data(chunksize) for _ in range(args.nthreads)]
+    if args.pre_register_buffer:
+        start = clock()
+        for array in arrays:
+            kvikio.memory_register(array)
+    time_after_register = clock()
+    if args.pre_register_buffer:
+        print(f"Register time: {time_after_register - start}")
+
+    # Write
+    files = [
+        kvikio.CuFile(file_path % i, flags="w") for i in range(args.nthreads)
+    ]
+    t0 = clock()
+    print(f"File open time: {t0 - time_after_register}")
+    futures = [
+        executor.submit(f.write, a, size=a.nbytes)
+        for f, a in zip(files, arrays)
+    ]
+    res = sum(f.result() for f in futures)
+    del files
+    write_time = clock() - t0
+    assert res == args.nbytes
+
+    # Read
+    files = [
+        kvikio.CuFile(file_path % i, flags="r") for i in range(args.nthreads)
+    ]
+    t0 = clock()
+    futures = [
+        executor.submit(f.read, a, size=a.nbytes)
+        for f, a in zip(files, arrays)
+    ]
+    res = sum(f.result() for f in futures)
     del files
     read_time = clock() - t0
     assert res == args.nbytes
@@ -276,6 +337,7 @@ API = {
     "zarr": run_zarr,
     "posix": run_posix,
     "cufile-mfma": run_cufile_multiple_files_multiple_arrays,
+    "cufile-mfma-variant": run_cufile_multiple_files_multiple_arrays_variant,
     "cufile-mf": run_cufile_multiple_files,
     "cufile-ma": run_cufile_multiple_arrays,
 }
@@ -392,7 +454,7 @@ if __name__ == "__main__":
         "-n",
         "--nbytes",
         metavar="BYTES",
-        default="4096 MiB",
+        default="8192 MiB",
         type=parse_bytes,
         help=(
             "Message size, which must be a multiple of 8 (default:"
