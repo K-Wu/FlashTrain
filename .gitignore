@@ -48,3 +48,5 @@ build/
 build*/
 *.bak
 *.txt
+*.tar.gz
+output_logs/
