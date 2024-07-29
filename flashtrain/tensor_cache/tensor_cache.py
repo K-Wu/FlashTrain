@@ -338,6 +338,7 @@ class TensorCache:
         tree = self.adaptive_keep_modules_data["all"]["tree"]
         tree.print_nodes()
         for node in tree.walk_nodes():
+            # Determine if node is the first layer to keep in GPU memory
             previous_nodes = tree.get_previous_nodes(node)
             previous_nodes_volume = sum(
                 [
@@ -364,7 +365,7 @@ class TensorCache:
                                 "historical_time"
                             ]
                         )
-                        for n in previous_nodes + [node]
+                        for n in previous_nodes
                     ]
                 )
             )
@@ -732,7 +733,7 @@ class TensorCache:
                         "current_iter_events"
                     ]
 
-            logger.critical(
+            print(
                 f"Adaptive keep profiling: {self.adaptive_keep_modules_data}"
             )
 
@@ -779,9 +780,7 @@ class TensorCache:
                 self.adaptive_kept_layers_beginning = (
                     self.adaptive_kept_layers_beginning.scope
                 )
-            logger.critical(
-                f"Adaptive keep: {self.adaptive_kept_layers_beginning}"
-            )
+            print(f"Adaptive keep: {self.adaptive_kept_layers_beginning}")
 
         if self.enable_activation_context_recording:
             # Except for the first forward pass, we are in the backward pass and need to do clear up.
