@@ -160,6 +160,7 @@ def is_deepspeed_megatron_activation_checkpoint_in_traceback():
 
 # When micro-batches is employed, we can still use the TensorCache across micro-batches because we don't save parameters, which may change across micro-batches.
 class TensorCache:
+    nvtx_enabled: bool
     fine_grained_release_in_activation_context_backward: bool
     enable_activation_context_recording: bool
     enable_prefetch: bool
@@ -391,6 +392,7 @@ class TensorCache:
         # If set, we offload the first few transformer layers and keep the activation in the last few transformer layers in the GPU memory.
         # TODO: In future, we can extend this to offloading the first few, recomputing the middle few, and keeping the activation in the last few layers. However, this will require changes in Megatron DeepSpeed's transformer module implementation.
         adaptive_keep: bool = True,
+        nvtx_enabled: bool = False,
         # By default, do the profiling in the second micro-batch until the third micro-batch (not including the end_iter). We skip the first micro-batch because it is used to measure host pinned memory use.
         adaptive_keep_profiling_begin_iter: int = 2,
         adaptive_keep_profiling_end_iter: int = 3,
@@ -439,6 +441,7 @@ class TensorCache:
         self.fine_grained_release_in_activation_context_backward = (
             fine_grained_release_in_activation_context_backward
         )
+        self.nvtx_enabled = nvtx_enabled
         self.ignored_module_names = ignored_module_names
         self.ignored_module_recursively_names = (
             ignored_module_recursively_names
@@ -1261,6 +1264,9 @@ class TensorCache:
     # Reference about forward hooks and backward hooks: https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook
     def get_forward_pre_hook(self) -> Callable[..., None]:
         def forward_pre_hook(m: torch.nn.Module, input) -> None:
+            if self.nvtx_enabled:
+                torch.cuda.nvtx.range_push(f"forward_{m._get_name()}")
+
             if self.enable_activation_context_recording:
                 if not self.current_in_backward:
                     # First, update the current ActivationContext
@@ -1358,6 +1364,8 @@ class TensorCache:
 
     def get_forward_hook(self) -> Callable[..., None]:
         def forward_hook(m, input, output) -> None:
+            if self.nvtx_enabled:
+                torch.cuda.nvtx.range_pop()
             if self.enable_activation_context_recording:
                 if self.current_in_backward:
                     if (
@@ -1438,6 +1446,8 @@ class TensorCache:
 
     def get_full_backward_pre_hook(self) -> Callable[..., None]:
         def full_backward_pre_hook(m, grad_output) -> None:
+            if self.nvtx_enabled:
+                torch.cuda.nvtx.range_push(f"backward_{m._get_name()}")
             logger.debug(
                 f"Full backward pre hook for ({id(m)})"
                 f" {get_oneline_str(m._get_name())}"
@@ -1508,6 +1518,8 @@ class TensorCache:
                     del self.module_id_to_reenter_count[id(m)]
 
         def full_backward_hook(m, grad_input, grad_output) -> None:
+            if self.nvtx_enabled:
+                torch.cuda.nvtx.range_pop()
             # A module is done. Clear up all stuff regarding this module, e.g., tensors inside this module, this module's mapping to these tensors.
             if all_is_none(grad_input):
                 logger.warning(

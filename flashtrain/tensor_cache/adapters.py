@@ -347,7 +347,7 @@ class KvikioIOAdapter(AdapterBase):
                     event.synchronize()
                 else:
                     future = f.pwrite(
-                        tensor_cupy, task_size=tensor_cupy.nbytes
+                        tensor_cupy  # , task_size=tensor_cupy.nbytes
                     )
                     future.get()
 
@@ -381,7 +381,13 @@ class KvikioIOAdapter(AdapterBase):
         else:
             need_to_convert_to_bool = False
 
-        tensor = torch.empty(shape, dtype=dtype, device=device)
+        # if dtype == torch.uint8:
+        #     tensor = torch.randn(shape, device=device).to(dtype)
+        # else:
+        #     tensor = torch.randn(shape, dtype=dtype, device=device)
+
+        tensor = torch.zeros(shape, dtype=dtype, device=device)
+
         # tensor_cupy = cupy.asarray(tensor)
 
         if self.is_async:
@@ -404,9 +410,10 @@ class KvikioIOAdapter(AdapterBase):
                     event.record(load_stream)
                     event.synchronize()
                 else:
+                    pass
                     future = f.pread(
                         tensor,
-                        task_size=tensor.numel() * tensor.element_size(),
+                        # task_size=tensor.numel() * tensor.element_size(),
                     )
                     future.get()
         except Exception as e:
