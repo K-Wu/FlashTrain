@@ -152,6 +152,9 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
+export KVIKIO_COMPAT_MODE=0
+export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
+
 torchrun $DISTRIBUTED_ARGS \
        "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
        --use-flash-attn-v2 \

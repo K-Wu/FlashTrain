@@ -24,17 +24,23 @@ DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 #    --recompute-method uniform \
 
 
+#    --profile-memory-beginning \
 
 BERT_ARGS="
+    --use-reevaluator \
+    --deepspeed-activation-checkpointing \
+    --recompute-granularity full \
+    --recompute-num-layers 1\
+    --recompute-method uniform \
+    --lossy-offload-first-iter \
     --use-pure-low-precision \
-    --profile-memory-beginning \
-    --tensor-cache-log-level ERROR \
+    --tensor-cache-log-level CRITICAL \
     --enable-tensor-cache \
     --tensor-cache-in-memory-adapter \
     --no-bias-gelu-fusion \
     --use-flash-attn-v2 \
     --bert-no-binary-head \
-    --num-layers 2 \
+    --num-layers 3 \
     --hidden-size 8192 \
     --num-attention-heads 32 \
     --seq-length 512 \
@@ -68,6 +74,9 @@ OUTPUT_ARGS="
 "
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
+
+export KVIKIO_COMPAT_MODE=0
+export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
 
 # According to https://forums.developer.nvidia.com/t/nsys-segfault-during-profile-pthread-create-when-connected-over-ssh-with-x11/187703/4
 # /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert --force-overwrite true  --trace=cuda --sample=cpu --cuda-memory-usage true \

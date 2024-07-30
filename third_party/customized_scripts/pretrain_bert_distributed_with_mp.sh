@@ -18,6 +18,17 @@ BASE_PATH=./tmp
 mkdir -p $BASE_PATH
 DS_CONFIG=${BASE_PATH}/deepspeed.json
 
+CHECKPOINT_PATH=./tmp
+VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
+DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
+
+DISTRIBUTED_ARGS="
+    --nproc_per_node $GPUS_PER_NODE \
+    --nnodes $NNODES \
+    --node_rank $NODE_RANK \
+    --master_addr $MASTER_ADDR \
+    --master_port $MASTER_PORT
+"
 
 ## In addition, we find that the 3.9B model (even after tuning INIT_STD) has
 ## NaN loss issue from the beginning thus unable to train. This is probably
@@ -52,19 +63,27 @@ DS_CONFIG=${BASE_PATH}/deepspeed.json
 # INIT_STD=0.011
 
 ## My custom BERT
-NUM_LAYERS=3
-HIDDEN_SIZE=8192
-NUM_ATTN_HEADS=32
+# NUM_LAYERS=3
+NUM_LAYERS=${NUM_LAYERS:-3}
+# HIDDEN_SIZE=8192
+HIDDEN_SIZE=12288
+# HIDDEN_SIZE=6144
+# NUM_ATTN_HEADS=32
+NUM_ATTN_HEADS=128
+# NUM_ATTN_HEADS=64
 INIT_STD=0.02
 
 
-GLOBAL_BATCH_SIZE=32
-MICRO_BATCH_SIZE=32
+GLOBAL_BATCH_SIZE=8
+MICRO_BATCH_SIZE=8
 ZERO_STAGE=0
 
 ## Activation checkpointing saves GPU memory, but reduces training speed
-ACTIVATION_CHECKPOINT="false"
-USE_TENSOR_CACHE="true"
+ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}"
+USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
+# ACTIVATION_CHECKPOINT="false"
+# USE_TENSOR_CACHE="true"
+# USE_TENSOR_CACHE="false"
 
 LTD_ENABLED="false"
 
@@ -94,28 +113,34 @@ EOT
     ds_args="--deepspeed-activation-checkpointing ${ds_args}"
   fi
 fi
-    
 
-CHECKPOINT_PATH=./tmp
-VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
-DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 
-DISTRIBUTED_ARGS="
-    --nproc_per_node $GPUS_PER_NODE \
-    --nnodes $NNODES \
-    --node_rank $NODE_RANK \
-    --master_addr $MASTER_ADDR \
-    --master_port $MASTER_PORT
-"
+
+#  --tensor-cache-log-level CRITICAL
+# --tensor-cache-in-memory-adapter 
+if [ "${USE_TENSOR_CACHE}" = "true" ]; then
+  BERT_ARGS="--enable-tensor-cache --tensor-cache-log-level CRITICAL --cufile-malloc-hook-is-used"
+fi
+
+if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+  #BERT_ARGS="${BERT_ARGS} --recompute-granularity selective --recompute-num-layers 1 --recompute-method block "
+  BERT_ARGS="${BERT_ARGS} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
+fi
+
+
 
 # --profile-memory-beginning \
 # --profile-first-iter \
+# --profile-first-iter-longer \
+# --optimizer sgd\
+# --use-distributed-optimizer \
 
-BERT_ARGS="
+BERT_ARGS="${BERT_ARGS} \
+    --optimizer sgd\
+    --ends-on 8\
     --lossy-offload-first-iter \
     --use-pure-low-precision \
     --use-flash-attn-v2 \
-    --use-distributed-optimizer \
     --no-bias-gelu-fusion \
     --bert-no-binary-head \
     --tensor-model-parallel-size 2 \
@@ -139,15 +164,12 @@ BERT_ARGS="
     --fp16-lm-cross-entropy \
 "
 
+
 # Do not use --checkpoint-activations in any case. It is superceded by --deepspeed-activation-checkpointing and --recompute-granularity
 # if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
 # BERT_ARGS="${BERT_ARGS} \
 #     --checkpoint-activations"
 # fi
-
-if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
-  BERT_ARGS="${BERT_ARGS} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
-fi
 
 if [ "${LTD_ENABLED}" = "true" ]; then
 BERT_ARGS="${BERT_ARGS} \
@@ -156,10 +178,6 @@ BERT_ARGS="${BERT_ARGS} \
     --random-ltd"
 fi
 
-#  --tensor-cache-log-level CRITICAL
-if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-in-memory-adapter --tensor-cache-log-level CRITICAL"
-fi
 
 DATA_ARGS="
     --data-path $DATA_PATH \
@@ -177,7 +195,10 @@ OUTPUT_ARGS="
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
-# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert_distributed --force-overwrite true  --trace=cuda --sample=cpu --cuda-memory-usage true \
+export KVIKIO_COMPAT_MODE=0
+export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
+
+# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert_distributed --force-overwrite true  --trace=cuda,nvtx --sample=cpu --cuda-memory-usage true \
 torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_bert.py \
     $BERT_ARGS \
     $DATA_ARGS \

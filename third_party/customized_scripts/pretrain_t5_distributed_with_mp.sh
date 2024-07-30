@@ -24,8 +24,12 @@ DISTRIBUTED_ARGS="
 "
 
 T5_ARGS="
+    --ends-on 5\
+    --lossy-offload-first-iter \
+    --use-pure-low-precision \
     --use-flash-attn-v2 \
     --enable-tensor-cache \
+    --tensor-cache-in-memory-adapter \
     --tensor-model-parallel-size 2 \
     --num-layers 12 \
     --decoder-num-layers 12 \
@@ -65,6 +69,9 @@ OUTPUT_ARGS="
 "
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
+
+export KVIKIO_COMPAT_MODE=0
+export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
 
 torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_t5.py \
     $T5_ARGS \
