@@ -2,7 +2,7 @@ import torch
 from .tensor_cache import (
     TensorCache,
 )
-from .profiler_tree import (
+from .scope_tree import (
     ModuleReentrantContext,
     ActivationContext,
 )

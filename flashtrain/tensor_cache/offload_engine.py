@@ -7,6 +7,7 @@ from .adapters import (
     KvikioIOAdapter,
     RevolverIOAdapter,
     PeakTrackNoIOLossyAdapter,
+    TorchDummyIOAdapter,
 )
 import kvikio.defaults
 import threading
@@ -61,6 +62,10 @@ class OffloadEngineBase(metaclass=ABCMeta):
     def switch_to_original_adapter(self):
         raise NotImplementedError
 
+    @abstractmethod
+    def switch_to_dummy_adapter(self):
+        raise NotImplementedError
+
 
 class ThreadedOffloadEngine(OffloadEngineBase):
     executor: concurrent.futures.ThreadPoolExecutor
@@ -103,6 +108,10 @@ class ThreadedOffloadEngine(OffloadEngineBase):
     def switch_to_peak_track_adapter(self):
         self.original_adapter = self.adapter
         self.adapter = PeakTrackNoIOLossyAdapter()
+
+    def switch_to_dummy_adapter(self):
+        self.original_adapter = self.adapter
+        self.adapter = TorchDummyIOAdapter()
 
     def switch_to_original_adapter(self):
         self.adapter = self.original_adapter
@@ -262,6 +271,7 @@ class CommandType(Enum):
     PRINT_LOADED_TENSORS = 7
     SWITCH_TO_PEAK_TRACK_ADAPTER = 8
     SWITCH_TO_ORIGINAL_ADAPTER = 9
+    SWITCH_TO_DUMMY_ADAPTER = 10
 
 
 # @thread_wrapped_func
@@ -307,6 +317,8 @@ def engine_main_loop(
                 engine.switch_to_peak_track_adapter()
             case CommandType.SWITCH_TO_ORIGINAL_ADAPTER:
                 engine.switch_to_original_adapter()
+            case CommandType.SWITCH_TO_DUMMY_ADAPTER:
+                engine.switch_to_dummy_adapter()
             case CommandType.TERMINATE:
                 break
             case _:
@@ -406,6 +418,10 @@ class ProcessOffloadEngine(OffloadEngineBase):
 
     def switch_to_original_adapter(self):
         self.command_queue.put((CommandType.SWITCH_TO_ORIGINAL_ADAPTER, ()))
+        self.result_queue.get()
+
+    def switch_to_dummy_adapter(self):
+        self.command_queue.put((CommandType.SWITCH_TO_DUMMY_ADAPTER, ()))
         self.result_queue.get()
 
 

@@ -13,12 +13,12 @@ import threading
 import traceback
 from ..logger import logger, get_oneline_str
 from .utils import TensorEqID, del_dict_key_if_exists
-from .profiler_tree import (
+from .scope_tree import (
     ActivationContext,
     ModuleReentrantContext,
     SavedActivationContext,
-    ProfilerTree,
-    ProfilerTreeNode,
+    ScopeTree,
+    ScopeTreeNode,
 )
 import math
 from .adapters import AdapterBase, KvikioIOAdapter, RevolverIOAdapter
@@ -172,10 +172,8 @@ class TensorCache:
     adaptive_keep_profiling_begin_iter: int
     adaptive_keep_profiling_end_iter: int
     current_forward_iter: int
-    # adaptive_keep_layer_first_level_name: set[str]
-    # adaptive_keep_layer_second_level_name: set[str]
     adaptive_keep_layer_names_in_track: set[str]
-    # self.adaptive_keep_modules_data = {"all":{"tree":ProfilerTree,"historical_compute_time": list[float, ...], "historical_IO_time": list[float, ...], "current_iter_compute_events":list[torch.cuda.Event,...], "current_iter_IO_events":list[torch.cuda.Event,...]},
+    # self.adaptive_keep_modules_data = {"all":{"tree":ScopeTree,"historical_compute_time": list[float, ...], "historical_IO_time": list[float, ...], "current_iter_compute_events":list[torch.cuda.Event,...], "current_iter_IO_events":list[torch.cuda.Event,...]},
     #                                    ModuleReentrantContext|SavedActivationContext:{"historical_time": list[float, ...], "current_iter_events":list[torch.cuda.Event,...],"index": int, "packed_data_size": int, "each_packed_data_size": list[int]}}
     adaptive_keep_modules_data: dict[
         SavedActivationContext | ModuleReentrantContext | str, dict
@@ -230,9 +228,13 @@ class TensorCache:
     saved_ignored_last_modules: (
         set[ModuleReentrantContext | SavedActivationContext] | None
     )
-    next_module_to_previous_module: dict[
+    module_to_prefetch_list: dict[
         ModuleReentrantContext | SavedActivationContext,
-        ModuleReentrantContext | SavedActivationContext,
+        list[ModuleReentrantContext | SavedActivationContext],
+    ]
+    full_scope_tree: ScopeTree
+    module_prefetch_issued: set[
+        ModuleReentrantContext | SavedActivationContext
     ]
     backward_done_modules: set[ModuleReentrantContext | ActivationContext]
     backward_done_modules_with_cache_to_clear: set[
@@ -320,13 +322,12 @@ class TensorCache:
     def del_reevaluated_output(self, reevaluator_context: ActivationContext):
         del self.module_to_reevaluate_data[reevaluator_context]["outputs"]
 
-    def solve_num_adaptive_keep_layers(self) -> ProfilerTreeNode | None:
+    def solve_num_adaptive_keep_layers(self) -> ScopeTreeNode | None:
         # Total offload volume / # Total offload time == bandwidth
         # (Offloading + first-layer reloading volume) / (Forward + backward until first-layer reloading time) == bandwidth
 
-        # adaptive_keep_layer_first_level_name: set[str] = {"ParallelTransformerLayer"},
-        # adaptive_keep_layer_second_level_name: set[str] = {"ParallelAttention", "ParallelMLP"},
-        # tensor_cache.measured_activation_gpu_memory_size
+        # E.g., the first-level scopes in track are ParallelTransformerLayer,
+        # the second-level scopes in track are ParallelAttention and ParallelMLP.
 
         forward_IO_time = np.mean(
             self.adaptive_keep_modules_data["all"]["historical_IO_time"]
@@ -396,13 +397,6 @@ class TensorCache:
         # By default, do the profiling in the second micro-batch until the third micro-batch (not including the end_iter). We skip the first micro-batch because it is used to measure host pinned memory use.
         adaptive_keep_profiling_begin_iter: int = 2,
         adaptive_keep_profiling_end_iter: int = 3,
-        adaptive_keep_layer_first_level_name: set[str] = {
-            "ParallelTransformerLayer"
-        },
-        adaptive_keep_layer_second_level_name: set[str] = {
-            "ParallelAttention",
-            "ParallelMLP",
-        },
         # The module names of each layer that tensor cache should track. The last few layers will be kept in the GPU memory.
         # Coarser granularity {"ParallelTransformerlayer"}
         # Finer granularity {"ParallelAttention", "ParallelMLP"}
@@ -466,12 +460,6 @@ class TensorCache:
                 ):
                     adapter.is_being_profiled = True
 
-        self.adaptive_keep_layer_first_level_name = (
-            adaptive_keep_layer_first_level_name
-        )
-        self.adaptive_keep_layer_second_level_name = (
-            adaptive_keep_layer_second_level_name
-        )
         self.adaptive_keep_layer_names_in_track = (
             adaptive_keep_layer_names_in_track
         )
@@ -508,7 +496,9 @@ class TensorCache:
         self.module_id_to_module = {}
         self.saved_forward_done_modules = None
         self.saved_ignored_last_modules = set()
-        self.next_module_to_previous_module = {}
+        self.module_to_prefetch_list = {}
+        self.full_scope_tree = ScopeTree()
+        self.module_prefetch_issued = set()
 
         ##
         ## Auxiliary
@@ -603,6 +593,14 @@ class TensorCache:
         )
 
     def wait_backward(self):
+        # Print the full scope tree
+        if self.current_forward_iter == 0:
+            self.full_scope_tree.print_nodes()
+            logger.critical(
+                "Module id to module:"
+                f" {[(key,value()._get_name()) for key, value in self.module_id_to_module.items()]}"
+            )
+
         # Read the timing of select modules and the forward propagation if in the specified iteration range
         if self.adaptive_keep and (
             self.adaptive_keep_profiling_begin_iter
@@ -837,6 +835,7 @@ class TensorCache:
 
         # Clear all the data structures that are only used in the backward pass that is just finished.
         # logger.error(get_oneline_str("backward_done_modules", self.backward_done_modules))
+        self.module_prefetch_issued.clear()
         self.forward_done_modules.clear()
         self.backward_done_modules.clear()
         self.current_forward_iter += 1
@@ -887,14 +886,9 @@ class TensorCache:
         self.current_forward_module_scope_stack.clear()
         if self.saved_forward_done_modules is None:
             self.build_ignored_modules_and_last_modules()
-        assert self.saved_forward_done_modules is not None
-        # Build next_module_to_previous_module based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
-        self.next_module_to_previous_module = {
-            self.saved_forward_done_modules[
-                idx + 1
-            ]: self.saved_forward_done_modules[idx]
-            for idx in range(len(self.saved_forward_done_modules) - 1)
-        }
+        # Build module_to_prefetch_list based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
+        self.build_plain_module_to_prefetch_list()
+
         # self.offloader.wait_for_storing_queue()
         # logger.critical("self.forward_done_modules")
         # logger.critical(self.forward_done_modules)
@@ -1101,31 +1095,32 @@ class TensorCache:
             #         return None
             return activation_context
 
+    def build_plain_module_to_prefetch_list(self):
+        if self.saved_forward_done_modules is None:
+            self.build_ignored_modules_and_last_modules()
+        assert self.saved_forward_done_modules is not None
+        # Build module_to_prefetch_list based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
+        self.module_to_prefetch_list = {
+            self.saved_forward_done_modules[idx + 1]: [
+                self.saved_forward_done_modules[idx]
+            ]
+            for idx in range(len(self.saved_forward_done_modules) - 1)
+        }
+
+    def build_module_to_prefetch_list(self):
+        raise NotImplementedError
+
     def prefetch_next_module_in_backward(
         self, backward_pre_hook_target: torch.nn.Module
     ) -> None:
         """Use post-order traversal to do prefetch according to forward_done_modules"""
-        if len(self.next_module_to_previous_module) == 0:
+        if len(self.module_to_prefetch_list) == 0:
             logger.warning(
-                "Producing next_module_to_previous_module. It is recommended"
+                "Producing module_to_prefetch_list. It is recommended"
                 " to call set_backward() before calling"
                 " prefetch_next_module_in_backward()."
             )
-            if self.saved_forward_done_modules is None:
-                logger.warning(
-                    "Building saved_forward_done_modules in"
-                    " prefetch_next_module_in_backward(). It should be built"
-                    " already in finish_up_forward()"
-                )
-                self.build_ignored_modules_and_last_modules()
-            assert self.saved_forward_done_modules is not None
-            # Build next_module_to_previous_module based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
-            self.next_module_to_previous_module = {
-                self.saved_forward_done_modules[
-                    idx + 1
-                ]: self.saved_forward_done_modules[idx]
-                for idx in range(len(self.saved_forward_done_modules) - 1)
-            }
+            self.build_plain_module_to_prefetch_list()
 
         backward_pre_module = ModuleReentrantContext(
             module_id=id(backward_pre_hook_target),
@@ -1134,20 +1129,24 @@ class TensorCache:
             )
             - 1,
         )
-        if backward_pre_module in self.next_module_to_previous_module:
-            module_to_prefetch = self.next_module_to_previous_module[
+        if backward_pre_module in self.module_to_prefetch_list:
+            modules_to_prefetch = self.module_to_prefetch_list[
                 backward_pre_module
             ]
-            if isinstance(module_to_prefetch, SavedActivationContext):
-                module_to_prefetch = self.activation_checkpoints[
-                    module_to_prefetch.seq_id
-                ]
-            if module_to_prefetch in self.module_id_to_tensor_ids:
-                logger.debug(
-                    "Prefetching tensors in backward pre hook"
-                    f" {module_to_prefetch}"
-                )
-                self.prefetch_saved_tensors(module_to_prefetch)
+            for module_to_prefetch in modules_to_prefetch:
+                if module_to_prefetch in self.module_prefetch_issued:
+                    continue
+                self.module_prefetch_issued.add(module_to_prefetch)
+                if isinstance(module_to_prefetch, SavedActivationContext):
+                    module_to_prefetch = self.activation_checkpoints[
+                        module_to_prefetch.seq_id
+                    ]
+                if module_to_prefetch in self.module_id_to_tensor_ids:
+                    logger.debug(
+                        "Prefetching tensors in backward pre hook"
+                        f" {module_to_prefetch}"
+                    )
+                    self.prefetch_saved_tensors(module_to_prefetch)
 
     # TODO: parameterize the function to check if the module is the x-th last modules
     def is_last_module_in_forward(
@@ -1252,7 +1251,7 @@ class TensorCache:
                     self.adaptive_keep_modules_data["all"] = dict()
                     self.adaptive_keep_modules_data["all"][
                         "tree"
-                    ] = ProfilerTree()
+                    ] = ScopeTree()
                 if (
                     "current_iter_compute_events"
                     not in self.adaptive_keep_modules_data["all"]
@@ -1331,6 +1330,14 @@ class TensorCache:
                 )
             )
 
+            # In the first iteration, construct the full scope tree
+            if self.current_forward_iter == 0:
+                bottom_to_root_scope = self.get_scopes_bottom_to_root(False)
+                self.full_scope_tree.add_bottom_to_root_path(
+                    bottom_to_root_scope
+                )
+
+            # Record the timing in adaptive keep profiling iterations
             if self.adaptive_keep and (not self.current_in_backward):
                 if m._get_name() in self.adaptive_keep_layer_names_in_track:
                     self.adaptive_profiling_record_scope_beginning(
@@ -1522,6 +1529,8 @@ class TensorCache:
                 torch.cuda.nvtx.range_pop()
             # A module is done. Clear up all stuff regarding this module, e.g., tensors inside this module, this module's mapping to these tensors.
             if all_is_none(grad_input):
+                # Some modules may not have gradients to compute and therefore calling backward_hook before its submodules are done.
+                # Examples involve BertLoss, DistributedDataParallel, Float16Module, BertModel, TransformerLanguageModel, Embedding, VocabParallelEmbedding, etc.
                 logger.warning(
                     "All grad_input is None for"
                     f" {get_oneline_str(m._get_name())}. This may trigger"
@@ -1550,6 +1559,24 @@ class TensorCache:
             self.clear_up_done_backward_modules_cache()
 
         return full_backward_hook
+
+    def get_scopes_bottom_to_root(
+        self, track_only_adptive_keep_layer=False
+    ) -> list[SavedActivationContext | ModuleReentrantContext]:
+        """This function returns the current scope stack from the bottom to the root. Whenever a scope is an ActivationContext, it is replaced by the corresponding SavedActivationContext."""
+        bottom_to_root = []
+        for scope in reversed(self.current_forward_module_scope_stack):
+            if isinstance(scope, ActivationContext):
+                bottom_to_root.append(
+                    SavedActivationContext(
+                        seq_id=self.activation_checkpoints_seqid[scope]
+                    )
+                )
+            elif (
+                not track_only_adptive_keep_layer
+            ) or scope in self.adaptive_keep_modules_data:
+                bottom_to_root.append(scope)
+        return bottom_to_root
 
     # Reference: https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
     def get_pack_hook(self) -> Callable[[torch.Tensor], Any]:
@@ -1739,36 +1766,20 @@ class TensorCache:
                                     self.adaptive_keep_modules_data[module_id][
                                         "packed_data_size"
                                     ] += tensor_size
-                                if module_to_profile_identified:
-                                    bottom_to_root = []
-                                    for scope in reversed(
-                                        self.current_forward_module_scope_stack
-                                    ):
-                                        if isinstance(
-                                            scope, ActivationContext
-                                        ):
-                                            bottom_to_root.append(
-                                                SavedActivationContext(
-                                                    seq_id=self.activation_checkpoints_seqid[
-                                                        scope
-                                                    ]
-                                                )
-                                            )
-                                        elif (
-                                            scope
-                                            in self.adaptive_keep_modules_data
-                                        ):
-                                            bottom_to_root.append(scope)
-                                    self.adaptive_keep_modules_data["all"][
-                                        "tree"
-                                    ].add_bottom_to_root_path(bottom_to_root)
+                            if module_to_profile_identified:
+                                bottom_to_root = (
+                                    self.get_scopes_bottom_to_root(True)
+                                )
+                                self.adaptive_keep_modules_data["all"][
+                                    "tree"
+                                ].add_bottom_to_root_path(bottom_to_root)
 
                         # In the specified profiling iterations, profile the very beginning of the forward IO event
                         if "all" not in self.adaptive_keep_modules_data:
                             self.adaptive_keep_modules_data["all"] = dict()
                             self.adaptive_keep_modules_data["all"][
                                 "tree"
-                            ] = ProfilerTree()
+                            ] = ScopeTree()
                         if (
                             "current_iter_IO_events"
                             not in self.adaptive_keep_modules_data["all"]

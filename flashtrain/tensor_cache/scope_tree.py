@@ -23,39 +23,37 @@ class ModuleReentrantContext:
     reenter_count: int
 
 
-class ProfilerTreeNode:
+class ScopeTreeNode:
     scope: ModuleReentrantContext | SavedActivationContext
-    parent: Optional["ProfilerTreeNode"]
-    children: list["ProfilerTreeNode"]
+    parent: Optional["ScopeTreeNode"]
+    children: list["ScopeTreeNode"]
 
     def __init__(
         self,
         scope: ModuleReentrantContext | SavedActivationContext,
-        parent: Optional["ProfilerTreeNode"],
+        parent: Optional["ScopeTreeNode"],
     ):
         self.scope = scope
         self.parent = parent
         self.children = []
 
 
-def find_node_index_in(nodes: list[ProfilerTreeNode], node: ProfilerTreeNode):
+def find_node_index_in(nodes: list[ScopeTreeNode], node: ScopeTreeNode):
     for idx, n in enumerate(nodes):
         if n.scope == node.scope:
             return idx
     raise ValueError(f"Cannot find f{node.scope} in the list")
 
 
-class ProfilerTree:
+class ScopeTree:
     """
     This is a tree with TransformerLayer in the first level (roots), and MLP and attention blocks in the second level.
     When there is ActivationContext, aside from the above three tracked type of modules, their parent ActivationContext scope is also added to the tree.
     So ultimately there may be more than two levels.
     """
 
-    roots: list[ProfilerTreeNode]
-    nodes: dict[
-        ModuleReentrantContext | SavedActivationContext, ProfilerTreeNode
-    ]
+    roots: list[ScopeTreeNode]
+    nodes: dict[ModuleReentrantContext | SavedActivationContext, ScopeTreeNode]
 
     def __init__(self):
         self.roots = []
@@ -69,7 +67,7 @@ class ProfilerTree:
         # Nodes are in the order from the bottom to the top
         for scope in reversed(scopes):
             if scope not in self.nodes:
-                new_node = ProfilerTreeNode(scope, current_root)
+                new_node = ScopeTreeNode(scope, current_root)
                 current_root = new_node
                 self.nodes[scope] = new_node
                 current_children_list.append(new_node)
@@ -82,9 +80,7 @@ class ProfilerTree:
             scopes.append(node.scope)
         logger.critical(f"Nodes in post-order: {scopes}")
 
-    def get_previous_nodes(
-        self, node: ProfilerTreeNode
-    ) -> list[ProfilerTreeNode]:
+    def get_previous_nodes(self, node: ScopeTreeNode) -> list[ScopeTreeNode]:
         """Get all the nodes happen before the specified nodes.
         At each level, return all the nodes before the X-order parent (including X=0 which is itself).
         For example, if the specified node is the MLP block in the second Transformer layer,
@@ -112,7 +108,7 @@ class ProfilerTree:
 
         return previous_nodes
 
-    def walk_nodes_(self, node: ProfilerTreeNode):
+    def walk_nodes_(self, node: ScopeTreeNode):
         # Post-order traversal
         for child in node.children:
             yield from self.walk_nodes_(child)
@@ -129,7 +125,7 @@ if __name__ == "__main__":
     #  3   4   5   6
     # / \ /    /  /
     # 7 8 9  10 11
-    tree = ProfilerTree()
+    tree = ScopeTree()
     tree.add_bottom_to_root_path(
         [
             ModuleReentrantContext(7, 1),
