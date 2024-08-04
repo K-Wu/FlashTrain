@@ -164,6 +164,8 @@ class TensorCache:
     fine_grained_release_in_activation_context_backward: bool
     enable_activation_context_recording: bool
     enable_prefetch: bool
+    prefetch_until_leaf: bool
+    prefetch_num_leaves_per_chunk: int
     implicit_wait_and_set_backward: bool
     skip_small_tensors: bool
     ignored_module_names: set[str]
@@ -214,14 +216,17 @@ class TensorCache:
     ]
     # The order of modules calling forward hook is the reverse of modules calling backward pre hook
     forward_done_modules: list[ModuleReentrantContext | ActivationContext]
-    # Store the whole stack of forward done modules, as forward_modules_whole_stack, when saved_forward_done_modules is None
+    # Store the whole stack of forward done modules, as forward_modules_whole_stack, when saved_forward_done_modules_without_ignored is None
     forward_modules_whole_stack: list[
         list[ModuleReentrantContext | ActivationContext]
     ]
+    saved_forward_done_modules: (
+        list[ModuleReentrantContext | SavedActivationContext] | None
+    )
     # last_module_in_forward: ModuleReentrantContext | SavedActivationContext | None
     # last_module_in_backward: ModuleReentrantContext | SavedActivationContext | None
     # The last module in the forward pass is kept in the GPU memory if the next stage is the back propagation of the same microbatch. If the current backward propagation stage is about to finish, the last module in forward pass in the next microbatch's backward propagation is prefetched in the GPU memory.
-    saved_forward_done_modules: (
+    saved_forward_done_modules_without_ignored: (
         list[ModuleReentrantContext | SavedActivationContext] | None
     )
     # The last two (by default) modules are kept in the GPU memory and never offloaded or reloaded/prefetched, i.e., ModelLoss and ModelLMHead.
@@ -385,6 +390,8 @@ class TensorCache:
         self,
         enable_activation_context_recording=False,
         enable_prefetch=True,
+        prefetch_until_leaf=True,
+        prefetch_num_leaves_per_chunk=2,
         adapter: Optional[AdapterBase] = None,
         implicit_wait_and_set_backward: bool = False,
         skip_small_tensors: bool = True,
@@ -430,6 +437,8 @@ class TensorCache:
             enable_activation_context_recording
         )
         self.enable_prefetch = enable_prefetch
+        self.prefetch_until_leaf = prefetch_until_leaf
+        self.prefetch_num_leaves_per_chunk = prefetch_num_leaves_per_chunk
         self.implicit_wait_and_set_backward = implicit_wait_and_set_backward
         self.skip_small_tensors = skip_small_tensors
         self.fine_grained_release_in_activation_context_backward = (
@@ -495,6 +504,7 @@ class TensorCache:
         ## No changes across (micro-)batches
         self.module_id_to_module = {}
         self.saved_forward_done_modules = None
+        self.saved_forward_done_modules_without_ignored = None
         self.saved_ignored_last_modules = set()
         self.module_to_prefetch_list = {}
         self.full_scope_tree = ScopeTree()
@@ -554,6 +564,7 @@ class TensorCache:
 
     def build_ignored_modules_and_last_modules(self):
         self.saved_forward_done_modules = []
+        self.saved_forward_done_modules_without_ignored = []
         self.saved_ignored_last_modules = set()
         for idx_m, m in enumerate(self.forward_done_modules):
             if isinstance(m, ActivationContext):
@@ -562,6 +573,8 @@ class TensorCache:
                 )
             else:
                 to_save = m
+
+            self.saved_forward_done_modules.append(to_save)
 
             # For names specified in self.ignored_module_recursively_names, if there is any such module to ignore in forward_modules_whole_stack[idx_m], then this module m should be ignored.
             # For example, we need to ignore the linear layer inside LMHead.
@@ -585,7 +598,7 @@ class TensorCache:
             ):
                 self.saved_ignored_last_modules.add(to_save)
             else:
-                self.saved_forward_done_modules.append(to_save)
+                self.saved_forward_done_modules_without_ignored.append(to_save)
         logger.warning(
             get_oneline_str(
                 "saved_ignored_last_modules", self.saved_ignored_last_modules
@@ -825,9 +838,9 @@ class TensorCache:
                 self.clear_up_done_backward_modules_cache()
                 self.delayed_backward_done_modules_with_cache_to_clear.clear()
 
-        if self.saved_forward_done_modules is None:
+        if self.saved_forward_done_modules_without_ignored is None:
             logger.warning(
-                "Building saved_forward_done_modules in"
+                "Building saved_forward_done_modules_without_ignored in"
                 " prefetch_next_module_in_backward(). It should be built"
                 " already in finish_up_forward()"
             )
@@ -884,10 +897,13 @@ class TensorCache:
         if self.enable_activation_context_recording:
             self._update_current_activation_context_in_forward()
         self.current_forward_module_scope_stack.clear()
-        if self.saved_forward_done_modules is None:
+        if self.saved_forward_done_modules_without_ignored is None:
             self.build_ignored_modules_and_last_modules()
-        # Build module_to_prefetch_list based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
-        self.build_plain_module_to_prefetch_list()
+        # Build module_to_prefetch_list based on saved_forward_done_modules_without_ignored because the saved_forward_done_modules_without_ignored exclude ignored modules
+        if self.prefetch_until_leaf:
+            self.build_module_to_prefetch_list()
+        else:
+            self.build_plain_module_to_prefetch_list()
 
         # self.offloader.wait_for_storing_queue()
         # logger.critical("self.forward_done_modules")
@@ -955,7 +971,7 @@ class TensorCache:
             self.forward_done_modules.append(
                 self.current_forward_module_scope_stack[-1]
             )
-            if self.saved_forward_done_modules is None:
+            if self.saved_forward_done_modules_without_ignored is None:
                 self.forward_modules_whole_stack.append(
                     self.current_forward_module_scope_stack.copy()
                 )
@@ -1096,19 +1112,45 @@ class TensorCache:
             return activation_context
 
     def build_plain_module_to_prefetch_list(self):
-        if self.saved_forward_done_modules is None:
+        if self.saved_forward_done_modules_without_ignored is None:
             self.build_ignored_modules_and_last_modules()
-        assert self.saved_forward_done_modules is not None
-        # Build module_to_prefetch_list based on saved_forward_done_modules because the saved_forward_done_modules exclude ignored modules
+        assert self.saved_forward_done_modules_without_ignored is not None
+        # Build module_to_prefetch_list based on saved_forward_done_modules_without_ignored because the saved_forward_done_modules_without_ignored exclude ignored modules
         self.module_to_prefetch_list = {
-            self.saved_forward_done_modules[idx + 1]: [
-                self.saved_forward_done_modules[idx]
+            self.saved_forward_done_modules_without_ignored[idx + 1]: [
+                self.saved_forward_done_modules_without_ignored[idx]
             ]
-            for idx in range(len(self.saved_forward_done_modules) - 1)
+            for idx in range(
+                len(self.saved_forward_done_modules_without_ignored) - 1
+            )
         }
 
     def build_module_to_prefetch_list(self):
-        raise NotImplementedError
+        self.module_to_prefetch_list = {}
+
+        # First, go through self.saved_forward_done_modules from the end to the beginning, and divide the list into chunks where each chunk ends with a leaf module.
+        module_chunks: list[
+            list[ModuleReentrantContext | SavedActivationContext]
+        ] = [[]]
+        current_chunk_num_leaves = 0
+        for module in reversed(self.saved_forward_done_modules):
+            module_chunks[-1].append(module)
+            if len(module_chunks[-1]) == 1:
+                continue
+            if self.full_scope_tree.is_leaf(module):
+                current_chunk_num_leaves += 1
+                if (
+                    current_chunk_num_leaves
+                    == self.prefetch_num_leaves_per_chunk
+                ):
+                    # Add a new chunk
+                    module_chunks.append([module])
+                    current_chunk_num_leaves = 0
+
+        self.module_to_prefetch_list = {
+            module_chunks[idx][0]: module_chunks[idx][1:]
+            for idx in range(len(module_chunks) - 1)
+        }
 
     def prefetch_next_module_in_backward(
         self, backward_pre_hook_target: torch.nn.Module
@@ -1120,7 +1162,10 @@ class TensorCache:
                 " to call set_backward() before calling"
                 " prefetch_next_module_in_backward()."
             )
-            self.build_plain_module_to_prefetch_list()
+            if self.prefetch_until_leaf:
+                self.build_module_to_prefetch_list()
+            else:
+                self.build_plain_module_to_prefetch_list()
 
         backward_pre_module = ModuleReentrantContext(
             module_id=id(backward_pre_hook_target),
@@ -1152,7 +1197,7 @@ class TensorCache:
     def is_last_module_in_forward(
         self, m: torch.nn.Module, is_pre_hook: bool = True
     ) -> bool:
-        if self.saved_forward_done_modules is None:
+        if self.saved_forward_done_modules_without_ignored is None:
             return False
 
         # When the forward hook is triggered, the reenter count has been incremented by 1 for the next reentrance. We need to offset that by 1 to reflect the reenter count of the module that just has been done.
@@ -1166,28 +1211,31 @@ class TensorCache:
                 module_id=id(m),
                 reenter_count=reenter_count,
             )
-            == self.saved_forward_done_modules[-1]
+            == self.saved_forward_done_modules_without_ignored[-1]
         )
 
     # TODO: parameterize the function to check if the module is the x-th last modules
     def prefetch_last_module_in_forward_if_not_None(self):
         # Do the prefetch
-        if self.saved_forward_done_modules is not None:
+        if self.saved_forward_done_modules_without_ignored is not None:
             if isinstance(
-                self.saved_forward_done_modules[-1], SavedActivationContext
+                self.saved_forward_done_modules_without_ignored[-1],
+                SavedActivationContext,
             ):
                 self.prefetch_saved_tensors(
                     self.activation_checkpoints[
-                        self.saved_forward_done_modules[-1].seq_id
+                        self.saved_forward_done_modules_without_ignored[
+                            -1
+                        ].seq_id
                     ]
                 )
             else:
                 self.prefetch_saved_tensors(
-                    self.saved_forward_done_modules[-1]
+                    self.saved_forward_done_modules_without_ignored[-1]
                 )
 
     def is_last_module_in_backward(self, m: torch.nn.Module) -> bool:
-        if self.saved_forward_done_modules is None:
+        if self.saved_forward_done_modules_without_ignored is None:
             return False
         return (
             ModuleReentrantContext(
@@ -1195,7 +1243,7 @@ class TensorCache:
                 reenter_count=self.module_id_to_reenter_count.get(id(m), 1)
                 - 1,
             )
-            == self.saved_forward_done_modules[0]
+            == self.saved_forward_done_modules_without_ignored[0]
         )
 
     def adaptive_profiling_record_scope_end(
@@ -1443,7 +1491,7 @@ class TensorCache:
                                 True
                             )
 
-            if self.saved_forward_done_modules is None:
+            if self.saved_forward_done_modules_without_ignored is None:
                 self.forward_modules_whole_stack.append(
                     self.current_forward_module_scope_stack.copy()
                 )
@@ -1635,6 +1683,8 @@ class TensorCache:
                             self.current_backward_activation_context
                         )
                 else:  # not self.current_in_backward
+                    # In DeepSpeed/Megatron, the checkpointing implementation runs the function before storing the input to the checkpointing region. Thus forward_pre_hook is sufficient to detect the activation region entrance.
+                    # TODO: If torch checkpointing is used, this may not be the case. And we may need to update current activation context here.
                     # First, update the current ActivationContext
                     # self._update_current_activation_context_in_forward()
                     current_scope = self.current_forward_module_scope_stack[-1]

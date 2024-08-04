@@ -59,6 +59,13 @@ class ScopeTree:
         self.roots = []
         self.nodes = dict()
 
+    def is_leaf(
+        self, module: ModuleReentrantContext | SavedActivationContext
+    ) -> bool:
+        if module in self.nodes:
+            return len(self.nodes[module].children) == 0
+        raise ValueError(f"Cannot find {module} in the tree")
+
     def add_bottom_to_root_path(
         self, scopes: list[ModuleReentrantContext | SavedActivationContext]
     ):
