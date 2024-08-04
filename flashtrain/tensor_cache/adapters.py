@@ -251,6 +251,7 @@ class KvikioIOAdapter(AdapterBase):
     path: str
     lock: threading.Lock
     is_async: bool
+    enable_detach: bool
     streams: list[torch.cuda.Stream] | None
     current_stream_idx: int | None
     is_being_profiled: bool | None
@@ -258,11 +259,16 @@ class KvikioIOAdapter(AdapterBase):
     end_timestamp: list[float] | None
 
     def __init__(
-        self, path: str = "/tmp", num_streams: int = 2, is_async: bool = True
+        self,
+        path: str = "/tmp",
+        num_streams: int = 2,
+        is_async: bool = True,
+        enable_detach=True,
     ):
         super().__init__()
         self.path = path
         self.is_async = is_async
+        self.enable_detach = enable_detach
 
         if is_async:
             self.streams = []
@@ -316,7 +322,12 @@ class KvikioIOAdapter(AdapterBase):
         """
         # tensor_cupy = cupy.asarray(tensor)
         # Issue at https://github.com/cupy/cupy/issues/7144
-        tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
+        logger.info(f"Kvikio Saving tensor to {path}")
+        if self.enable_detach:
+            tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
+        else:
+            tensor_cupy = cupy.from_dlpack(tensor.contiguous())
+        logger.info("Kvikio Saving tensor tensor_cupy obtained")
 
         if self.is_async:
             assert self.streams is not None

@@ -100,5 +100,9 @@ def get_adapter():
     )
     if num_kvikio_threads > 0:
         kvikio.defaults.num_threads_reset(num_kvikio_threads)
+        logger.critical(
+            "Setting kvikio threads to"
+            f" {num_kvikio_threads} {kvikio.defaults.get_num_threads()}"
+        )
         kvikio.defaults.task_size_reset(67108864)
     return results

@@ -4,16 +4,23 @@
 # This example script is contributed by external user https://github.com/nrailgun
 set -ex
 
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
+
 ######################################
 # Change the below configurations here
 BASE_PATH=./tmp
 # Create the directory in order to save the deepspeed.json file
 mkdir -p $BASE_PATH
 DS_CONFIG=${BASE_PATH}/deepspeed.json
-DATASET_1="$HOME/.cache/my_huggingface_datasets/meg-gpt2_text_document"
-DATASET="1 ${DATASET_1}"
+# DATASET_1="$HOME/.cache/my_huggingface_datasets/meg-gpt2_text_document"
+# DATASET="1 ${DATASET_1}"
 CHECKPOINT_PATH=./tmp
 TOKENIZER_PATH=$HOME/.cache/my_huggingface_datasets/tokenizer.model # offical llama tokenizer.model
+
+
+VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
+DATASET="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 
 TP=2
 PP=1
@@ -37,12 +44,13 @@ hyperparam_args=""
 if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
 # TODO: add other model size
   HIDDEN_SIZE=2048 # e.g. llama-13b: 5120
-  FFN_HIDDEN_SIZE=5504 # e.g. llama-13b: 13824
   NUM_LAYERS=24 # e.g. llama-13b: 40
   NUM_HEADS=16 # e.g. llama-13b: 40
   NUM_KV_HEADS=4 # llama2 70B uses GQA
+  # We suppress FFN_HIDDEN_SIZE and use Megatron's default value for swiglu for now.
+  # FFN_HIDDEN_SIZE=5504 # e.g. llama-13b: 13824
   # Add llama-unique FFN_HIDDEN_SIZE to hyperparam_args. NUM_KV_HEADS will be added later in llama_args
-  hyperparam_args="${hyperparam_args} --ffn-hidden-size $FFN_HIDDEN_SIZE"
+  # hyperparam_args="${hyperparam_args} --ffn-hidden-size $FFN_HIDDEN_SIZE"
 else # GPT-2
   # 12-layer, 768-hidden, 12-heads, 117M parameters
   # 24-layer, 1024-hidden, 16-heads, 345M parameters
@@ -114,7 +122,18 @@ fi
 ######################################
 
 
+ACTIVATION_CHECKPOINT="false"
+if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
+then
+    llama_args="${llama_args} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
+elif [ "${ACTIVATION_CHECKPOINT}" = "full" ] 
+then
+    llama_args="${llama_args} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
+fi
 
+ENABLE_DEEPSPEED="false"
+ds_args=""
+if [ "$ENABLE_DEEPSPEED" = "true" ]; then
 cat <<EOT > $DS_CONFIG
 {
   "train_batch_size" : $GLOBAL_BATCH_SIZE,
@@ -128,23 +147,22 @@ cat <<EOT > $DS_CONFIG
   }
 }
 EOT
+  ds_args=" --deepspeed ${ds_args}"
+  ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
+  ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
 
-ds_args=""
-ds_args=" --deepspeed ${ds_args}"
-ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
-ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
+  if [ "${activation_checkpoint}" = "true" ]; then
+    ds_args="--deepspeed-activation-checkpointing ${ds_args}"
 
-if [ "${activation_checkpoint}" = "true" ]; then
-  ds_args="--deepspeed-activation-checkpointing ${ds_args}"
+    ## Don't use the following old argument for recomputing the transformer layer!
+    # ds_args="--checkpoint-activations ${ds_args}"
 
-  ## Don't use the following old argument for recomputing the transformer layer!
-  # ds_args="--checkpoint-activations ${ds_args}"
-
-  ## Use instead the new argument for recomputing the transformer layer
-  ## KWU: Support to Megatron's new checkpointing mechanism is added in https://github.com/microsoft/Megatron-DeepSpeed/pull/243
-  ds_args="--recompute-granularity full --recompute-method uniform ${ds_args}"
-  ## new argument for recomputing only the attention layer
-  # ds_args="--recompute-granularity selective ${ds_args}"
+    ## Use instead the new argument for recomputing the transformer layer
+    ## KWU: Support to Megatron's new checkpointing mechanism is added in https://github.com/microsoft/Megatron-DeepSpeed/pull/243
+    # ds_args="--recompute-granularity full --recompute-method uniform ${ds_args}"
+    ## new argument for recomputing only the attention layer
+    # ds_args="--recompute-granularity selective ${ds_args}"
+  fi
 fi
 
 
@@ -154,11 +172,13 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
 export KVIKIO_COMPAT_MODE=0
 export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
-
+#      --tensor-cache-in-memory-adapter \
 torchrun $DISTRIBUTED_ARGS \
        "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
+       --disable-detach-in-kvikio \
        --use-flash-attn-v2 \
        --enable-tensor-cache \
+       --tensor-cache-log-level INFO \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \
        $hyperparam_args \
@@ -170,6 +190,7 @@ torchrun $DISTRIBUTED_ARGS \
        --save $CHECKPOINT_PATH \
        --load $CHECKPOINT_PATH \
        --data-path $DATASET \
+       --vocab-file $VOCAB_FILE \
        --data-impl mmap \
        --tokenizer-type GPTSentencePieceTokenizer \
        --tokenizer-model $TOKENIZER_PATH \
