@@ -1,5 +1,6 @@
 #!/bin/bash
 # Adapted from https://github.com/microsoft/Megatron-DeepSpeed/blob/94dbfd1cd35fea44f3a504722060bee4962816e8/examples/pretrain_t5_distributed_with_mp.sh (forked from github.com/microsoft/Megatron-DeepSpeed/) with dataset and tokernizer path changed according to the working datasets specified in test_load_datasets.py
+set -ex
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
@@ -10,6 +11,18 @@ MASTER_PORT=6000
 NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
+
+
+NUM_LAYERS=${NUM_LAYERS:-2}
+DECODER_NUM_LAYERS=${DECODER_NUM_LAYERS:-1}
+HIDDEN_SIZE=${HIDDEN_SIZE:-12288}
+NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-128}
+SEQ_LENGTH=${SEQ_LENGTH:-1024}
+ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
+USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
+TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
 
 CHECKPOINT_PATH=./tmp
 VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
@@ -22,26 +35,28 @@ DISTRIBUTED_ARGS="
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT
 "
-
+#    --ffn-hidden-size 3072 \
+#    --profile-first-iter-longer \
 T5_ARGS="
-    --ends-on 5\
+    --optimizer sgd \
+    --no-bias-gelu-fusion \
+    --ends-on 12\
     --lossy-offload-first-iter \
     --use-pure-low-precision \
     --use-flash-attn-v2 \
-    --enable-tensor-cache \
-    --tensor-cache-in-memory-adapter \
+    --tensor-cache-log-level CRITICAL \
+    --cufile-malloc-hook-is-used \
     --tensor-model-parallel-size 2 \
-    --num-layers 12 \
-    --decoder-num-layers 12 \
-    --hidden-size 768 \
-    --num-attention-heads 12 \
+    --num-layers ${NUM_LAYERS} \
+    --decoder-num-layers ${DECODER_NUM_LAYERS} \
+    --hidden-size ${HIDDEN_SIZE} \
+    --num-attention-heads ${NUM_ATTN_HEADS} \
     --kv-channels 64 \
-    --ffn-hidden-size 3072 \
-    --encoder-seq-length 512 \
-    --decoder-seq-length 512 \
-    --max-position-embeddings 512 \
-    --micro-batch-size 16 \
-    --global-batch-size 128 \
+    --encoder-seq-length ${SEQ_LENGTH} \
+    --decoder-seq-length ${SEQ_LENGTH} \
+    --max-position-embeddings ${SEQ_LENGTH} \
+    --micro-batch-size ${MICRO_BATCH_SIZE} \
+    --global-batch-size ${GLOBAL_BATCH_SIZE} \
     --lr 0.0001 \
     --train-iters 1000 \
     --lr-decay-iters 1000 \
@@ -51,6 +66,7 @@ T5_ARGS="
     --lr-warmup-fraction .01 \
     --clip-grad 1.0 \
     --fp16  \
+    --fp16-lm-cross-entropy \
     --vocab-extra-ids 100
 "
 
@@ -62,10 +78,10 @@ DATA_ARGS="
 "
 
 OUTPUT_ARGS="
-    --log-interval 10 \
+    --log-interval 1 \
     --save-interval 10000 \
     --eval-interval 10000 \
-    --eval-iters 10
+    --eval-iters 100
 "
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
@@ -73,6 +89,7 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 export KVIKIO_COMPAT_MODE=0
 export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
 
+# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_t5_distributed --force-overwrite true  --trace=cuda,nvtx --sample=cpu --cuda-memory-usage true \
 torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_t5.py \
     $T5_ARGS \
     $DATA_ARGS \

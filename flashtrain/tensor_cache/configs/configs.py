@@ -18,22 +18,6 @@ HOSTNAMES_TO_CONFIGS = {
                 (
                     KvikioIOAdapter,
                     {
-                        "path": "/mnt/md2/kunwu2/FlashTrain_temp/",
-                        "is_async": False,
-                    },
-                ),
-                # (
-                #     KvikioIOAdapter,
-                #     {
-                #         "path": "/mnt/md4/kunwu2/FlashTrain_temp/",
-                #         "is_async": False,
-                #     },
-                # )
-            ],  # Rank 0
-            [
-                (
-                    KvikioIOAdapter,
-                    {
                         "path": "/mnt/md3/kunwu2/FlashTrain_temp/",
                         "is_async": False,
                     },
@@ -42,6 +26,22 @@ HOSTNAMES_TO_CONFIGS = {
                 #     KvikioIOAdapter,
                 #     {
                 #         "path": "/mnt/md5/kunwu2/FlashTrain_temp/",
+                #         "is_async": False,
+                #     },
+                # )
+            ],  # Rank 0
+            [
+                (
+                    KvikioIOAdapter,
+                    {
+                        "path": "/mnt/md2/kunwu2/FlashTrain_temp/",
+                        "is_async": False,
+                    },
+                ),
+                # (
+                #     KvikioIOAdapter,
+                #     {
+                #         "path": "/mnt/md4/kunwu2/FlashTrain_temp/",
                 #         "is_async": False,
                 #     },
                 # )

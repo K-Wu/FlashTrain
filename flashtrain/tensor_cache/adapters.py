@@ -251,7 +251,6 @@ class KvikioIOAdapter(AdapterBase):
     path: str
     lock: threading.Lock
     is_async: bool
-    enable_detach: bool
     streams: list[torch.cuda.Stream] | None
     current_stream_idx: int | None
     is_being_profiled: bool | None
@@ -263,12 +262,10 @@ class KvikioIOAdapter(AdapterBase):
         path: str = "/tmp",
         num_streams: int = 2,
         is_async: bool = True,
-        enable_detach=True,
     ):
         super().__init__()
         self.path = path
         self.is_async = is_async
-        self.enable_detach = enable_detach
 
         if is_async:
             self.streams = []
@@ -279,6 +276,7 @@ class KvikioIOAdapter(AdapterBase):
         else:
             self.streams = None
             self.current_stream_idx = None
+            # TODO: is_being_profiled as a single flag does not support multiple microbatches
             self.is_being_profiled = False
             self.start_timestamp = []
             self.end_timestamp = []
@@ -320,29 +318,26 @@ class KvikioIOAdapter(AdapterBase):
         """
         Save the tensor to the file.
         """
-        # tensor_cupy = cupy.asarray(tensor)
-        # Issue at https://github.com/cupy/cupy/issues/7144
-        logger.info(f"Kvikio Saving tensor to {path}")
-        if self.enable_detach:
-            tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
-        else:
-            tensor_cupy = cupy.from_dlpack(tensor.contiguous())
-        logger.info("Kvikio Saving tensor tensor_cupy obtained")
-
-        if self.is_async:
-            assert self.streams is not None
-            assert self.current_stream_idx is not None
-            with self.lock:
-                store_stream = self.streams[self.current_stream_idx]
-                self.current_stream_idx = (self.current_stream_idx + 1) % len(
-                    self.streams
-                )
-        else:
-            with self.lock:
-                if self.is_being_profiled:
-                    self.start_timestamp.append(time.time())
-
         try:
+            # tensor_cupy = cupy.asarray(tensor)
+            # Issue at https://github.com/cupy/cupy/issues/7144
+            logger.info(f"Kvikio Saving tensor to {path}")
+            tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
+            logger.info("Kvikio Saving tensor tensor_cupy obtained")
+
+            if self.is_async:
+                assert self.streams is not None
+                assert self.current_stream_idx is not None
+                with self.lock:
+                    store_stream = self.streams[self.current_stream_idx]
+                    self.current_stream_idx = (
+                        self.current_stream_idx + 1
+                    ) % len(self.streams)
+            else:
+                with self.lock:
+                    if self.is_being_profiled:
+                        self.start_timestamp.append(time.time())
+
             with kvikio.CuFile(path, "w") as f:
                 if self.is_async:
                     # Wait until the computation finishes before saving the tensor
@@ -364,11 +359,10 @@ class KvikioIOAdapter(AdapterBase):
 
         except Exception as e:
             logger.critical(f"Error in saving tensor to path {path}: {e}")
-        logger.debug(
+        logger.info(
             "Kvikio Saved tensor"
             f" {get_oneline_str(tensor_cupy, verbose_only=True)} ({TensorEqID.from_tensor(tensor)})"
         )
-
         if not self.is_async:
             with self.lock:
                 if self.is_being_profiled:
@@ -384,33 +378,32 @@ class KvikioIOAdapter(AdapterBase):
         """
         Load the tensor from the file.
         """
-
-        # Fixing the loading KeyError caused by dtype=torch.bool
-        if dtype == torch.bool:
-            dtype = torch.uint8
-            need_to_convert_to_bool = True
-        else:
-            need_to_convert_to_bool = False
-
-        # if dtype == torch.uint8:
-        #     tensor = torch.randn(shape, device=device).to(dtype)
-        # else:
-        #     tensor = torch.randn(shape, dtype=dtype, device=device)
-
-        tensor = torch.zeros(shape, dtype=dtype, device=device)
-
-        # tensor_cupy = cupy.asarray(tensor)
-
-        if self.is_async:
-            assert self.streams is not None
-            assert self.current_stream_idx is not None
-            with self.lock:
-                load_stream = self.streams[self.current_stream_idx]
-                self.current_stream_idx = (self.current_stream_idx + 1) % len(
-                    self.streams
-                )
-
         try:
+            # Fixing the loading KeyError caused by dtype=torch.bool
+            if dtype == torch.bool:
+                dtype = torch.uint8
+                need_to_convert_to_bool = True
+            else:
+                need_to_convert_to_bool = False
+
+            # if dtype == torch.uint8:
+            #     tensor = torch.randn(shape, device=device).to(dtype)
+            # else:
+            #     tensor = torch.randn(shape, dtype=dtype, device=device)
+
+            tensor = torch.zeros(shape, dtype=dtype, device=device)
+
+            # tensor_cupy = cupy.asarray(tensor)
+
+            if self.is_async:
+                assert self.streams is not None
+                assert self.current_stream_idx is not None
+                with self.lock:
+                    load_stream = self.streams[self.current_stream_idx]
+                    self.current_stream_idx = (
+                        self.current_stream_idx + 1
+                    ) % len(self.streams)
+
             with kvikio.CuFile(path, "r+") as f:
                 if self.is_async:
                     future = f.raw_read_async(tensor, load_stream.cuda_stream)
@@ -700,6 +693,20 @@ class TorchDummyIOAdapter(AdapterBase):
             f" path {path}"
         )
         return tensor
+
+    def clean_up_in_backward(
+        self,
+        path: str,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        if not (path, shape, dtype, device) in self.gpu_tensor_cache:
+            # Avoid error when simultaneously clean up tensors and storing the tensor being cleaned up
+            # TODO: add a clean up all in the end of the backward propagation
+            return
+        with self.lock:
+            del self.gpu_tensor_cache[(path, shape, dtype, device)]
 
 
 class RevolverIOAdapter(AdapterBase):

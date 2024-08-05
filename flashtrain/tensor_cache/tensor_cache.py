@@ -621,6 +621,7 @@ class TensorCache:
             < self.adaptive_keep_profiling_end_iter
         ):
             # Make sure the forward propagation has completed.
+            self.offloader.wait_for_storing_queue()
             self.adaptive_keep_modules_data["all"][
                 "current_iter_compute_events"
             ][1].synchronize()
@@ -682,8 +683,12 @@ class TensorCache:
                         if isinstance(adapter, KvikioIOAdapter) and (
                             not adapter.is_async
                         ):
-                            self.offloader.wait_for_storing_queue()
                             # Convert to milliseconds
+
+                            logger.critical(
+                                "Reading kvikio profiling"
+                                f" {id(adapter)} {len(adapter.start_timestamp)} {len(adapter.end_timestamp)}"
+                            )
                             IO_time.append(
                                 1000
                                 * (
@@ -766,6 +771,7 @@ class TensorCache:
                     not adapter.is_async
                 ):
                     adapter.is_being_profiled = True
+                    print(f"Setting is_being_profiled to True {id(adapter)}")
         if (
             self.adaptive_keep
             and self.current_forward_iter
@@ -1663,6 +1669,13 @@ class TensorCache:
                     f" size {math.prod(tensor.size())}"
                 )
                 return tensor
+
+            # if tensor.dtype == torch.bool:
+            #     logger.info(
+            #         f"Tensor is boolean. Skip packing of tensor {tensor_id},"
+            #         f" size {math.prod(tensor.size())}"
+            #     )
+            #     return tensor
 
             if self.enable_activation_context_recording:
                 # Skipping the pack hook in the backward propagation to avoid issue in activation recomputation.

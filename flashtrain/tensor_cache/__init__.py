@@ -17,9 +17,10 @@ def _ensure_var_is_initialized(var, name):
     assert var is not None, "{} is not initialized.".format(name)
 
 
-def set_tensor_cache(tensor_cache):
+def set_tensor_cache(tensor_cache, reset_flag=False):
     global __GLOBAL_TENSOR_CACHE
-    _ensure_var_is_not_initialized(__GLOBAL_TENSOR_CACHE, "tensor cache")
+    if not reset_flag:
+        _ensure_var_is_not_initialized(__GLOBAL_TENSOR_CACHE, "tensor cache")
     __GLOBAL_TENSOR_CACHE = tensor_cache
 
 

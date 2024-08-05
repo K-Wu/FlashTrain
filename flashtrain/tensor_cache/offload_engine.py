@@ -55,6 +55,10 @@ class OffloadEngineBase(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
+    def clear_tensor_id_to_loaded_tensor(self):
+        raise NotImplementedError
+
+    @abstractmethod
     def switch_to_peak_track_adapter(self):
         raise NotImplementedError
 
@@ -81,6 +85,9 @@ class ThreadedOffloadEngine(OffloadEngineBase):
     filename_finished_use: set[str]
 
     lock: threading.Lock
+
+    def clear_tensor_id_to_loaded_tensor(self):
+        self.tensor_id_to_loaded_tensor.clear()
 
     def __init__(
         self,
@@ -250,7 +257,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                 )
 
     def print_loaded_tensors(self):
-        logger.error(
+        logger.critical(
             get_oneline_str(
                 "OffloadEngine.tensor_id_to_loaded_tensor",
                 self.tensor_id_to_loaded_tensor,
@@ -272,6 +279,7 @@ class CommandType(Enum):
     SWITCH_TO_PEAK_TRACK_ADAPTER = 8
     SWITCH_TO_ORIGINAL_ADAPTER = 9
     SWITCH_TO_DUMMY_ADAPTER = 10
+    CLEAR_TENSOR_ID_TO_LOADED_TENSOR = 11
 
 
 # @thread_wrapped_func
@@ -319,6 +327,8 @@ def engine_main_loop(
                 engine.switch_to_original_adapter()
             case CommandType.SWITCH_TO_DUMMY_ADAPTER:
                 engine.switch_to_dummy_adapter()
+            case CommandType.CLEAR_TENSOR_ID_TO_LOADED_TENSOR:
+                engine.clear_tensor_id_to_loaded_tensor()
             case CommandType.TERMINATE:
                 break
             case _:
@@ -422,6 +432,12 @@ class ProcessOffloadEngine(OffloadEngineBase):
 
     def switch_to_dummy_adapter(self):
         self.command_queue.put((CommandType.SWITCH_TO_DUMMY_ADAPTER, ()))
+        self.result_queue.get()
+
+    def clear_tensor_id_to_loaded_tensor(self):
+        self.command_queue.put(
+            (CommandType.CLEAR_TENSOR_ID_TO_LOADED_TENSOR, ())
+        )
         self.result_queue.get()
 
 
@@ -567,10 +583,14 @@ class OffloadHost:
         self.engine.clean_up_in_backward(tensor_ids)
 
     def print_loaded_tensors(self):
-        logger.error(
+        logger.critical(
             get_oneline_str(
                 "OffloadHost.tensor_id_to_loaded_tensor",
                 self.tensor_id_to_loaded_tensor,
             )
         )
         self.engine.print_loaded_tensors()
+
+    def clear_tensor_id_to_loaded_tensor(self):
+        self.engine.clear_tensor_id_to_loaded_tensor()
+        self.tensor_id_to_loaded_tensor.clear()

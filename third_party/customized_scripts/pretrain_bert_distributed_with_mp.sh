@@ -1,6 +1,8 @@
 #!/bin/bash
 # Adapted from https://github.com/microsoft/Megatron-DeepSpeed/blob/94dbfd1cd35fea44f3a504722060bee4962816e8/examples/pretrain_bert_distributed_with_mp.sh (forked from github.com/microsoft/Megatron-DeepSpeed/) with dataset and tokernizer path changed according to the working datasets specified in test_load_datasets.py
 # Incorporated arguments from https://github.com/microsoft/Megatron-DeepSpeed/blob/main/examples_deepspeed/data_efficiency/bert/pretrain/ds_pretrain_bert_336M_base_script.sh#L13
+set -ex
+
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 GPUS_PER_NODE=2
@@ -64,26 +66,23 @@ DISTRIBUTED_ARGS="
 
 ## My custom BERT
 # NUM_LAYERS=3
-NUM_LAYERS=${NUM_LAYERS:-3}
 # HIDDEN_SIZE=8192
-HIDDEN_SIZE=12288
 # HIDDEN_SIZE=6144
 # NUM_ATTN_HEADS=32
-NUM_ATTN_HEADS=128
 # NUM_ATTN_HEADS=64
-INIT_STD=0.02
 
-
-GLOBAL_BATCH_SIZE=8
-MICRO_BATCH_SIZE=8
-ZERO_STAGE=0
-
-## Activation checkpointing saves GPU memory, but reduces training speed
-ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}"
+NUM_LAYERS=${NUM_LAYERS:-3}
+HIDDEN_SIZE=${HIDDEN_SIZE:-12288}
+NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-128}
+SEQ_LENGTH=${SEQ_LENGTH:-1024}
+ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
 USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
-# ACTIVATION_CHECKPOINT="false"
-# USE_TENSOR_CACHE="true"
-# USE_TENSOR_CACHE="false"
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
+TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
+
+ZERO_STAGE=0
+INIT_STD=0.02
 
 LTD_ENABLED="false"
 
@@ -109,7 +108,8 @@ EOT
   ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
   ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
 
-  if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+  if [ "${ACTIVATION_CHECKPOINT}" = "selective" ] || [ "${ACTIVATION_CHECKPOINT}" = "full"  ]
+  then
     ds_args="--deepspeed-activation-checkpointing ${ds_args}"
   fi
 fi
@@ -119,12 +119,15 @@ fi
 #  --tensor-cache-log-level CRITICAL
 # --tensor-cache-in-memory-adapter 
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  BERT_ARGS="--enable-tensor-cache --tensor-cache-log-level CRITICAL --cufile-malloc-hook-is-used"
+  BERT_ARGS="--enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
 fi
 
-if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
-  #BERT_ARGS="${BERT_ARGS} --recompute-granularity selective --recompute-num-layers 1 --recompute-method block "
-  BERT_ARGS="${BERT_ARGS} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
+if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
+then
+    BERT_ARGS="${BERT_ARGS} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
+elif [ "${ACTIVATION_CHECKPOINT}" = "full" ] 
+then
+    BERT_ARGS="${BERT_ARGS} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
 fi
 
 
@@ -137,7 +140,7 @@ fi
 
 BERT_ARGS="${BERT_ARGS} \
     --optimizer sgd\
-    --ends-on 8\
+    --ends-on 12\
     --lossy-offload-first-iter \
     --use-pure-low-precision \
     --use-flash-attn-v2 \
@@ -148,8 +151,8 @@ BERT_ARGS="${BERT_ARGS} \
     --hidden-size ${HIDDEN_SIZE} \
     --num-attention-heads ${NUM_ATTN_HEADS} \
     --init-method-std ${INIT_STD} \
-    --seq-length 1024 \
-    --max-position-embeddings 1024 \
+    --seq-length ${SEQ_LENGTH} \
+    --max-position-embeddings ${SEQ_LENGTH} \
     --micro-batch-size $MICRO_BATCH_SIZE \
     --global-batch-size $GLOBAL_BATCH_SIZE \
     --lr 0.0001 \
@@ -190,7 +193,7 @@ OUTPUT_ARGS="
     --log-interval 1 \
     --save-interval 10000 \
     --eval-interval 10000 \
-    --eval-iters 10
+    --eval-iters 100
 "
 
 SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"

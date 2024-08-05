@@ -31,21 +31,22 @@ MASTER_ADDR=localhost
 MASTER_PORT=6000
 NNODES=1
 NODE_RANK=0
+WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 USE_LLAMA_INSTEAD_OF_GPT="true"
 if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
   MODEL_SIZE=2048 # TODO: currently unused. Add more model sizes and use MODEL_SIZE to switch between them
 else
-  MODEL_SIZE=345 # 117, 345, 774, 1558 for GPT-2
+  MODEL_SIZE=117 # 117, 345, 774, 1558 for GPT-2
 fi
 
 # Model hyperparameters
 hyperparam_args=""
 if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
 # TODO: add other model size
-  HIDDEN_SIZE=2048 # e.g. llama-13b: 5120
-  NUM_LAYERS=24 # e.g. llama-13b: 40
-  NUM_HEADS=16 # e.g. llama-13b: 40
+  HIDDEN_SIZE=12288 # e.g. llama-13b: 5120
+  NUM_LAYERS=3 # e.g. llama-13b: 40
+  NUM_ATTN_HEADS=128 # e.g. llama-13b: 40
   NUM_KV_HEADS=4 # llama2 70B uses GQA
   # We suppress FFN_HIDDEN_SIZE and use Megatron's default value for swiglu for now.
   # FFN_HIDDEN_SIZE=5504 # e.g. llama-13b: 13824
@@ -76,48 +77,39 @@ else # GPT-2
           echo "Model size not supported."
           exit 1
   fi
+  # Override by custom model size
+  NUM_LAYERS=3
+  HIDDEN_SIZE=12288
+  NUM_ATTN_HEADS=128
 fi
-hyperparam_args="${hyperparam_args} --hidden-size $HIDDEN_SIZE --num-layers $NUM_LAYERS --num-attention-heads $NUM_HEADS"
+hyperparam_args="${hyperparam_args} --hidden-size $HIDDEN_SIZE --num-layers $NUM_LAYERS --num-attention-heads $NUM_ATTN_HEADS"
 
 
 
-SEQ_LENGTH=2048
+SEQ_LENGTH=1024
 
-MICRO_BATCH_SIZE=4
-GLOBAL_BATCH_SIZE=32 # e.g. llama: 4M tokens
+MICRO_BATCH_SIZE=8
+GLOBAL_BATCH_SIZE=8 # e.g. llama: 4M tokens
 TRAIN_STEPS=2500 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
 LR=3e-4
 MIN_LR=3e-5
 LR_WARMUP_STEPS=2000
 WEIGHT_DECAY=0.1
-GRAD_CLIP=1
+GRAD_CLIP=1.0
 
-## Activation checkpointing saves GPU memory, but reduces training speed
-# activation_checkpoint="true"
-activation_checkpoint="false"
 
-# Below configuration required for llama model as per llama paper
-#  --no-query-key-layer-scaling \
-#  --attention-dropout 0 \
-#  --hidden-dropout 0 \
-#  --use-rotary-position-embeddings \
-#  --untie-embeddings-and-output-weights \
-#  --swiglu \
-#  --normalization rmsnorm \
-#  --disable-bias-linear \
-#  --num-key-value-heads $NUM_KV_HEADS # Line addition by KWU
 llama_args=""
 
 if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
   llama_args="${llama_args} --no-query-key-layer-scaling"
   llama_args="${llama_args} --attention-dropout 0"
-  llama_args="${llama_args} --hidden-dropout 0"
+  llama_args="${llama_args} --hidden-dropout 0.1"
   llama_args="${llama_args} --use-rotary-position-embeddings"
-  llama_args="${llama_args} --untie-embeddings-and-output-weights"
+  # llama_args="${llama_args} --untie-embeddings-and-output-weights"
   llama_args="${llama_args} --swiglu"
   llama_args="${llama_args} --normalization rmsnorm"
   llama_args="${llama_args} --disable-bias-linear"
-  llama_args="${llama_args} --num-key-value-heads $NUM_KV_HEADS"
+  llama_args="${llama_args} --num-key-value-heads $NUM_KV_HEADS" # Line addition by KWU
 fi
 ######################################
 
@@ -142,7 +134,7 @@ cat <<EOT > $DS_CONFIG
   "zero_optimization": {
     "stage": $ZERO_STAGE
   },
-  "bf16": {
+  "fp16": {
     "enabled": true
   }
 }
@@ -151,7 +143,7 @@ EOT
   ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
   ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
 
-  if [ "${activation_checkpoint}" = "true" ]; then
+  if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
     ds_args="--deepspeed-activation-checkpointing ${ds_args}"
 
     ## Don't use the following old argument for recomputing the transformer layer!
@@ -172,13 +164,23 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 
 export KVIKIO_COMPAT_MODE=0
 export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
+
 #      --tensor-cache-in-memory-adapter \
+#       --tensor-cache-reset-in-every-iteration \
+# /usr/local/cuda-12.1/bin/nsys profile -o pretrain_gpt_distributed --force-overwrite true  --trace=cuda,nvtx --sample=cpu --cuda-memory-usage true \
 torchrun $DISTRIBUTED_ARGS \
        "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
-       --disable-detach-in-kvikio \
-       --use-flash-attn-v2 \
+       --ends-on 12 \
        --enable-tensor-cache \
-       --tensor-cache-log-level INFO \
+       --tensor-cache-in-memory-adapter \
+       --disable-adaptive-keep \
+       --optimizer sgd \
+       --lossy-offload-first-iter \
+       --fp16-lm-cross-entropy \
+       --use-pure-low-precision \
+       --use-flash-attn-v2 \
+       --tensor-cache-log-level CRITICAL \
+       --cufile-malloc-hook-is-used \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \
        $hyperparam_args \
@@ -202,22 +204,10 @@ torchrun $DISTRIBUTED_ARGS \
        --weight-decay $WEIGHT_DECAY \
        --clip-grad $GRAD_CLIP \
        --lr-warmup-iters $LR_WARMUP_STEPS \
-       --optimizer adam \
-       --adam-beta1 0.9 \
-       --adam-beta2 0.95 \
        --log-interval 1 \
        --save-interval 10000 \
        --eval-interval 10000 \
-       --eval-iters 10 \
-       --bf16 \
-       --no-query-key-layer-scaling \
-       --attention-dropout 0 \
-       --hidden-dropout 0 \
-       --use-rotary-position-embeddings \
-       --untie-embeddings-and-output-weights \
-       --swiglu \
-       --normalization rmsnorm \
-       --disable-bias-linear \
-       --num-key-value-heads $NUM_KV_HEADS \
+       --eval-iters 100 \
+       --fp16 \
        $llama_args \
        $ds_args
