@@ -102,7 +102,7 @@ llama_args=""
 
 if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
   llama_args="${llama_args} --no-query-key-layer-scaling"
-  llama_args="${llama_args} --attention-dropout 0"
+  llama_args="${llama_args} --attention-dropout 0.1"
   llama_args="${llama_args} --hidden-dropout 0.1"
   llama_args="${llama_args} --use-rotary-position-embeddings"
   # llama_args="${llama_args} --untie-embeddings-and-output-weights"
@@ -172,8 +172,6 @@ torchrun $DISTRIBUTED_ARGS \
        "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
        --ends-on 12 \
        --enable-tensor-cache \
-       --tensor-cache-in-memory-adapter \
-       --disable-adaptive-keep \
        --optimizer sgd \
        --lossy-offload-first-iter \
        --fp16-lm-cross-entropy \
