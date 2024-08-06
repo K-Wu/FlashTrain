@@ -13,9 +13,10 @@ NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 
-NUM_LAYERS=${NUM_LAYERS:-2}
-DECODER_NUM_LAYERS=${DECODER_NUM_LAYERS:-1}
-HIDDEN_SIZE=${HIDDEN_SIZE:-12288}
+# NUM_LAYERS=${NUM_LAYERS:-2}
+ENCODER_NUM_LAYERS=${ENCODER_NUM_LAYERS:-2}
+DECODER_NUM_LAYERS=${DECODER_NUM_LAYERS:-2}
+HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
 NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-128}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
@@ -36,10 +37,13 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 #    --ffn-hidden-size 3072 \
+#    --profile-first-iter-longer \ 
 #    --profile-first-iter-longer \
+#    --tensor-cache-in-memory-adapter \
 T5_ARGS="
     --optimizer sgd \
     --no-bias-gelu-fusion \
+    --enable-tensor-cache \
     --ends-on 12\
     --lossy-offload-first-iter \
     --use-pure-low-precision \
@@ -47,7 +51,7 @@ T5_ARGS="
     --tensor-cache-log-level CRITICAL \
     --cufile-malloc-hook-is-used \
     --tensor-model-parallel-size 2 \
-    --num-layers ${NUM_LAYERS} \
+    --encoder-num-layers ${ENCODER_NUM_LAYERS} \
     --decoder-num-layers ${DECODER_NUM_LAYERS} \
     --hidden-size ${HIDDEN_SIZE} \
     --num-attention-heads ${NUM_ATTN_HEADS} \

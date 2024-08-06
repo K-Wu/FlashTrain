@@ -47,7 +47,7 @@ if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
   HIDDEN_SIZE=12288 # e.g. llama-13b: 5120
   NUM_LAYERS=3 # e.g. llama-13b: 40
   NUM_ATTN_HEADS=128 # e.g. llama-13b: 40
-  NUM_KV_HEADS=4 # llama2 70B uses GQA
+  NUM_KV_HEADS=8 # llama2 70B uses GQA
   # We suppress FFN_HIDDEN_SIZE and use Megatron's default value for swiglu for now.
   # FFN_HIDDEN_SIZE=5504 # e.g. llama-13b: 13824
   # Add llama-unique FFN_HIDDEN_SIZE to hyperparam_args. NUM_KV_HEADS will be added later in llama_args
@@ -88,8 +88,8 @@ hyperparam_args="${hyperparam_args} --hidden-size $HIDDEN_SIZE --num-layers $NUM
 
 SEQ_LENGTH=1024
 
-MICRO_BATCH_SIZE=8
-GLOBAL_BATCH_SIZE=8 # e.g. llama: 4M tokens
+MICRO_BATCH_SIZE=16
+GLOBAL_BATCH_SIZE=16 # e.g. llama: 4M tokens
 TRAIN_STEPS=2500 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
 LR=3e-4
 MIN_LR=3e-5
@@ -106,8 +106,9 @@ if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
   llama_args="${llama_args} --hidden-dropout 0.1"
   llama_args="${llama_args} --use-rotary-position-embeddings"
   # llama_args="${llama_args} --untie-embeddings-and-output-weights"
-  llama_args="${llama_args} --swiglu"
-  llama_args="${llama_args} --normalization rmsnorm"
+  # llama_args="${llama_args} --swiglu"
+  llama_args="${llama_args} --swiglu-ffn-size"
+  # llama_args="${llama_args} --normalization rmsnorm"
   llama_args="${llama_args} --disable-bias-linear"
   llama_args="${llama_args} --num-key-value-heads $NUM_KV_HEADS" # Line addition by KWU
 fi

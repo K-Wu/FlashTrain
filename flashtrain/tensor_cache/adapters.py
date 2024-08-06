@@ -321,9 +321,11 @@ class KvikioIOAdapter(AdapterBase):
         try:
             # tensor_cupy = cupy.asarray(tensor)
             # Issue at https://github.com/cupy/cupy/issues/7144
+            # Do it here to get it done as soon as possible in the main stream, not blocking the IO stream
+            tensor = tensor.contiguous()
             logger.info(f"Kvikio Saving tensor to {path}")
-            tensor_cupy = cupy.from_dlpack(tensor.contiguous().detach())
-            logger.info("Kvikio Saving tensor tensor_cupy obtained")
+            tensor_cupy = cupy.from_dlpack(tensor.detach())
+            logger.debug("Kvikio Saving tensor tensor_cupy obtained")
 
             if self.is_async:
                 assert self.streams is not None
@@ -453,7 +455,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         self.cpu_tensor_cache = {}
         self.streams = []
         for _ in range(num_streams):
-            self.streams.append(torch.cuda.Stream())
+            self.streams.append(torch.cuda.Stream(priority=-100))
         self.current_stream_idx = 0
         # self.lock = threading.Lock()
         self.use_host_pinned_memory_allocator = (
@@ -493,6 +495,8 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         Save the tensor to the file.
         """
         try:
+            # Do it here to get it done as soon as possible in the main stream, not blocking the IO stream
+            tensor = tensor.contiguous()
             with self.lock:
                 store_stream = self.streams[self.current_stream_idx]
                 self.current_stream_idx = (self.current_stream_idx + 1) % len(

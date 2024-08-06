@@ -423,6 +423,7 @@ class TensorCache:
             # Skip large tensors in the last few (non-transformer) layers and the loss layer.
             "Loss",
             "Model",  # e.g, "BertModel", "GPTModel". This applies to the tensors not inside transformer layers.
+            "RotaryEmbedding"
             # "ParallelMLP",
         },
         # Skip large tensors in the last few (non-transformer) layers and the loss layer.
@@ -665,6 +666,7 @@ class TensorCache:
                                 "current_iter_IO_events"
                             ][1]
                         ):
+                            # TODO: the IO_time measurement seems off in LLama case: when using memory, the IO time span is 1000ms but the measured is only slightly over 500 ms.
                             IO_time.append(
                                 self.adaptive_keep_modules_data[key][
                                     "current_iter_IO_events"
@@ -1662,7 +1664,7 @@ class TensorCache:
             # Skip small tensors to avoid the overhead of offloading and reloading.
             if (
                 self.skip_small_tensors
-                and math.prod(tensor.size()) < 1024 * 1024
+                and math.prod(tensor.size()) < 8 * 1024 * 1024
             ):
                 logger.info(
                     f"Tensor is small. Skip packing of tensor {tensor_id},"
@@ -1742,10 +1744,6 @@ class TensorCache:
 
                     # No need to store. Continue to the next step to register it into the other data structures.
                     logger.info(
-                        "Offloading is disabled/ignored. Skip packing of"
-                        f" {tensor_id}, size {math.prod(tensor.size())}."
-                    )
-                    logger.error(
                         "Offloading is disabled/ignored. Skip packing of"
                         f" {tensor_id}, size {math.prod(tensor.size())}."
                     )
