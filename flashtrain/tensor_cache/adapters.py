@@ -54,7 +54,11 @@ class AdapterBase(metaclass=ABCMeta):
 
     @abstractmethod
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -67,22 +71,24 @@ class AdapterBase(metaclass=ABCMeta):
         tensor: torch.Tensor,
         tensor_id: TensorEqID,
         path: str,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
         event: torch.cuda.Event,
     ):
-        self.save_tensor(tensor, path, event)
+        if tensor_id in tensor_id_to_loaded_tensor:
+            # The entry is already forwarded to the next process. We don't need to save this tensor
+            logger.critical(
+                f"Async wrapper not saving tensor {tensor_id} to {path}"
+            )
+            with self.lock:
+                if tensor_id in tensor_being_stored:
+                    del tensor_being_stored[tensor_id]
+            return
+        self.save_tensor(tensor, path, event, tensor_id_to_loaded_tensor)
         logger.debug(f"Async wrapper saved tensor {tensor_id}")
         with self.lock:
             if tensor_id in tensor_being_stored:
                 del tensor_being_stored[tensor_id]
-            else:
-                logger.error(
-                    f"Tensor {tensor_id} is not in tensor_being_stored"
-                )
-                # If not, it means the entry is already deleted from tensor_being_stored to signify the tensor is used in backward propagation before the storing is completed
-                self.clean_up_in_backward(
-                    path, tensor.shape, tensor.dtype, tensor.device
-                )
 
     @abstractmethod
     def load_tensor(
@@ -173,7 +179,11 @@ class TorchBuiltinIOAdapter(AdapterBase):
         return create_new_filename(identifier, tensor, self.path)
 
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -313,7 +323,11 @@ class KvikioIOAdapter(AdapterBase):
         return create_new_filename(identifier, tensor, self.path)
 
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -416,7 +430,6 @@ class KvikioIOAdapter(AdapterBase):
                     event.record(load_stream)
                     event.synchronize()
                 else:
-                    pass
                     future = f.pread(
                         tensor,
                         # task_size=tensor.numel() * tensor.element_size(),
@@ -489,7 +502,11 @@ class TorchMainMemoryIOAdapter(AdapterBase):
         return create_new_filename(identifier, tensor, "/in_memory")
 
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -622,7 +639,11 @@ class PeakTrackNoIOLossyAdapter(AdapterBase):
         return create_new_filename(identifier, tensor, "/peak_track_no_io")
 
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -668,7 +689,11 @@ class TorchDummyIOAdapter(AdapterBase):
         return create_new_filename(identifier, tensor, "/in_memory")
 
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -748,7 +773,11 @@ class RevolverIOAdapter(AdapterBase):
         return new_filename
 
     def save_tensor(
-        self, tensor: torch.Tensor, path: str, event: torch.cuda.Event
+        self,
+        tensor: torch.Tensor,
+        path: str,
+        event: torch.cuda.Event,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
     ):
         """
         Save the tensor to the file.
@@ -757,7 +786,10 @@ class RevolverIOAdapter(AdapterBase):
         separator_position = path.index(":")
         adapter_id = int(path[:separator_position])
         self.adapters[adapter_id].save_tensor(
-            tensor, path[separator_position + 1 :], event
+            tensor,
+            path[separator_position + 1 :],
+            event,
+            tensor_id_to_loaded_tensor,
         )
 
     def async_save_tensor(
@@ -765,18 +797,20 @@ class RevolverIOAdapter(AdapterBase):
         tensor: torch.Tensor,
         tensor_id: TensorEqID,
         path: str,
+        tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor],
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
         event: torch.cuda.Event,
     ):
-        self.save_tensor(tensor, path, event)
+        if tensor_id in tensor_id_to_loaded_tensor:
+            # The entry is already forwarded to the next process. We don't need to save this tensor
+            with self.lock:
+                if tensor_id in tensor_being_stored:
+                    del tensor_being_stored[tensor_id]
+            return
+        self.save_tensor(tensor, path, event, tensor_id_to_loaded_tensor)
         with self.lock:
             if tensor_id in tensor_being_stored:
                 del tensor_being_stored[tensor_id]
-            else:
-                # If not, it means the entry is already deleted from tensor_being_stored to signify the tensor is used in backward propagation before the storing is completed
-                self.clean_up_in_backward(
-                    path, tensor.shape, tensor.dtype, tensor.device
-                )
 
     def load_tensor(
         self,

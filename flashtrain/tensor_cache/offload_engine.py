@@ -51,28 +51,33 @@ class OffloadEngineBase(metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def print_loaded_tensors(self):
+    def print_loaded_tensors(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def clear_tensor_id_to_loaded_tensor(self):
+    def clear_tensor_id_to_loaded_tensor(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def switch_to_peak_track_adapter(self):
+    def switch_to_peak_track_adapter(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def switch_to_original_adapter(self):
+    def switch_to_original_adapter(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def switch_to_dummy_adapter(self):
+    def switch_to_dummy_adapter(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_num_tensors_being_loaded(self) -> int:
         raise NotImplementedError
 
 
 class ThreadedOffloadEngine(OffloadEngineBase):
-    executor: concurrent.futures.ThreadPoolExecutor
+    store_executor: concurrent.futures.ThreadPoolExecutor
+    load_executor: concurrent.futures.ThreadPoolExecutor
     tensor_id_to_loaded_tensor: dict[TensorEqID, torch.Tensor]
     tensor_being_stored: dict[TensorEqID, concurrent.futures.Future]
     tensor_being_loaded: dict[TensorEqID, concurrent.futures.Future]
@@ -89,14 +94,20 @@ class ThreadedOffloadEngine(OffloadEngineBase):
     def clear_tensor_id_to_loaded_tensor(self):
         self.tensor_id_to_loaded_tensor.clear()
 
+    def get_num_tensors_being_loaded(self):
+        return len(self.tensor_id_to_loaded_tensor)
+
     def __init__(
         self,
         adapter: AdapterBase | None,
         max_workers: int = 1,
         log_level: int = logging.INFO,
     ):
-        self.executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers
+        self.store_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=(max_workers + 1) // 2
+        )
+        self.load_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=(max_workers + 1) // 2
         )
         self.tensor_id_to_loaded_tensor = {}
         self.tensor_being_stored = {}
@@ -125,8 +136,9 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         del self.original_adapter
 
     def __del__(self):
-        # This function is only triggered when the reference count of the object is zero. In this case, we need to shutdown the executor.
-        self.executor.shutdown()
+        # This function is only triggered when the reference count of the object is zero. In this case, we need to shutdown the store_executor.
+        self.store_executor.shutdown()
+        self.load_executor.shutdown()
 
     def get_loaded_tensor(self, tensor_id: TensorEqID) -> torch.Tensor:
         future = None
@@ -189,11 +201,12 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         event = torch.cuda.Event()
         event.record(stream=torch.cuda.current_stream())
 
-        future = self.executor.submit(
+        future = self.store_executor.submit(
             self.adapter.async_save_tensor,
             tensor,
             tensor_id,
             self.tensor_id_to_filename_and_metadata[tensor_id][0],
+            self.tensor_id_to_loaded_tensor,
             self.tensor_being_stored,
             event,
         )
@@ -205,7 +218,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         for tensor_id in tensor_ids:
             if not tensor_id in self.tensor_being_loaded:
                 # The tensor is not being prefetched. Prefetch the tensor.
-                future = self.executor.submit(
+                future = self.load_executor.submit(
                     self.adapter.async_load_tensor,
                     self.tensor_id_to_filename_and_metadata[tensor_id][0],
                     self.tensor_id_to_filename_and_metadata[tensor_id][1],
@@ -222,6 +235,17 @@ class ThreadedOffloadEngine(OffloadEngineBase):
 
     def clean_up_in_backward(self, tensor_ids: set[TensorEqID]) -> None:
         for tensor_id in tensor_ids:
+            with self.adapter.lock:
+                del_dict_key_if_exists(
+                    self.tensor_being_loaded,
+                    tensor_id,
+                    None,
+                )
+                del_dict_key_if_exists(
+                    self.tensor_being_stored,
+                    tensor_id,
+                    None,
+                )
             with self.lock:
                 if tensor_id in self.tensor_id_to_filename_and_metadata:
                     # This clause is skipped in the last module in the forward pass due to offloading_disabled.
@@ -241,17 +265,6 @@ class ThreadedOffloadEngine(OffloadEngineBase):
                     )
                 del_dict_key_if_exists(
                     self.tensor_id_to_loaded_tensor,
-                    tensor_id,
-                    None,
-                )
-            with self.adapter.lock:
-                del_dict_key_if_exists(
-                    self.tensor_being_loaded,
-                    tensor_id,
-                    None,
-                )
-                del_dict_key_if_exists(
-                    self.tensor_being_stored,
                     tensor_id,
                     None,
                 )
@@ -280,6 +293,7 @@ class CommandType(Enum):
     SWITCH_TO_ORIGINAL_ADAPTER = 9
     SWITCH_TO_DUMMY_ADAPTER = 10
     CLEAR_TENSOR_ID_TO_LOADED_TENSOR = 11
+    GET_NUM_TENSORS_BEING_LOADED = 12
 
 
 # @thread_wrapped_func
@@ -323,12 +337,19 @@ def engine_main_loop(
                 result_queue.put("Done")
             case CommandType.SWITCH_TO_PEAK_TRACK_ADAPTER:
                 engine.switch_to_peak_track_adapter()
+                result_queue.put("Done")
             case CommandType.SWITCH_TO_ORIGINAL_ADAPTER:
                 engine.switch_to_original_adapter()
+                result_queue.put("Done")
             case CommandType.SWITCH_TO_DUMMY_ADAPTER:
                 engine.switch_to_dummy_adapter()
+                result_queue.put("Done")
             case CommandType.CLEAR_TENSOR_ID_TO_LOADED_TENSOR:
                 engine.clear_tensor_id_to_loaded_tensor()
+                result_queue.put("Done")
+            case CommandType.GET_NUM_TENSORS_BEING_LOADED:
+                result = engine.get_num_tensors_being_loaded()
+                result_queue.put(result)
             case CommandType.TERMINATE:
                 break
             case _:
@@ -439,6 +460,10 @@ class ProcessOffloadEngine(OffloadEngineBase):
             (CommandType.CLEAR_TENSOR_ID_TO_LOADED_TENSOR, ())
         )
         self.result_queue.get()
+
+    def get_num_tensors_being_loaded(self):
+        self.command_queue.put((CommandType.GET_NUM_TENSORS_BEING_LOADED, ()))
+        return self.result_queue.get()
 
 
 class OffloadHost:
@@ -594,3 +619,6 @@ class OffloadHost:
     def clear_tensor_id_to_loaded_tensor(self):
         self.engine.clear_tensor_id_to_loaded_tensor()
         self.tensor_id_to_loaded_tensor.clear()
+
+    def get_num_tensors_being_loaded(self):
+        return self.engine.get_num_tensors_being_loaded()

@@ -25,6 +25,7 @@ from .adapters import AdapterBase, KvikioIOAdapter, RevolverIOAdapter
 from typing import Optional
 from .offload_engine import OffloadHost
 import numpy as np
+from enum import Enum
 
 
 def get_process_descriptor() -> str:
@@ -158,13 +159,19 @@ def is_deepspeed_megatron_activation_checkpoint_in_traceback():
     )
 
 
+class PrefetchMode(Enum):
+    DISABLED = 0
+    ONE_AT_A_TIME = 1
+    CHUNK_PREFETCH_ONLY_AT_CHUNK_END = 2
+    CHUNK_PREFETCH_WHEN_ALL_ARE_DONE = 3
+
+
 # When micro-batches is employed, we can still use the TensorCache across micro-batches because we don't save parameters, which may change across micro-batches.
 class TensorCache:
     nvtx_enabled: bool
     fine_grained_release_in_activation_context_backward: bool
     enable_activation_context_recording: bool
-    enable_prefetch: bool
-    prefetch_until_leaf: bool
+    prefetch_mode: PrefetchMode
     prefetch_num_leaves_per_chunk: int
     implicit_wait_and_set_backward: bool
     skip_small_tensors: bool
@@ -174,6 +181,8 @@ class TensorCache:
     adaptive_keep_profiling_begin_iter: int
     adaptive_keep_profiling_end_iter: int
     current_forward_iter: int
+    # current_prefetch_chunk is to track the current chunk of leaves to prefetch in the backward pass.
+    current_prefetch_chunk: int
     adaptive_keep_layer_names_in_track: set[str]
     # self.adaptive_keep_modules_data = {"all":{"tree":ScopeTree,"historical_compute_time": list[float, ...], "historical_IO_time": list[float, ...], "current_iter_compute_events":list[torch.cuda.Event,...], "current_iter_IO_events":list[torch.cuda.Event,...]},
     #                                    ModuleReentrantContext|SavedActivationContext:{"historical_time": list[float, ...], "current_iter_events":list[torch.cuda.Event,...],"index": int, "packed_data_size": int, "each_packed_data_size": list[int]}}
@@ -233,7 +242,7 @@ class TensorCache:
     saved_ignored_last_modules: (
         set[ModuleReentrantContext | SavedActivationContext] | None
     )
-    module_to_prefetch_list: dict[
+    module_to_prefetch_modules: dict[
         ModuleReentrantContext | SavedActivationContext,
         list[ModuleReentrantContext | SavedActivationContext],
     ]
@@ -389,8 +398,7 @@ class TensorCache:
     def __init__(
         self,
         enable_activation_context_recording=False,
-        enable_prefetch=True,
-        prefetch_until_leaf=True,
+        prefetch_mode=PrefetchMode.CHUNK_PREFETCH_ONLY_AT_CHUNK_END,
         prefetch_num_leaves_per_chunk=2,
         adapter: Optional[AdapterBase] = None,
         implicit_wait_and_set_backward: bool = False,
@@ -437,8 +445,7 @@ class TensorCache:
         self.enable_activation_context_recording = (
             enable_activation_context_recording
         )
-        self.enable_prefetch = enable_prefetch
-        self.prefetch_until_leaf = prefetch_until_leaf
+        self.prefetch_mode = prefetch_mode
         self.prefetch_num_leaves_per_chunk = prefetch_num_leaves_per_chunk
         self.implicit_wait_and_set_backward = implicit_wait_and_set_backward
         self.skip_small_tensors = skip_small_tensors
@@ -458,6 +465,8 @@ class TensorCache:
             adaptive_keep_profiling_end_iter
         )
         self.current_forward_iter = 0
+        if prefetch_mode == PrefetchMode.CHUNK_PREFETCH_WHEN_ALL_ARE_DONE:
+            self.current_prefetch_chunk = 0
         if self.adaptive_keep and 0 >= self.adaptive_keep_profiling_begin_iter:
             if isinstance(self.offloader.engine.adapter, RevolverIOAdapter):
                 adapters = self.offloader.engine.adapter.adapters
@@ -507,7 +516,7 @@ class TensorCache:
         self.saved_forward_done_modules = None
         self.saved_forward_done_modules_without_ignored = None
         self.saved_ignored_last_modules = set()
-        self.module_to_prefetch_list = {}
+        self.module_to_prefetch_modules = {}
         self.full_scope_tree = ScopeTree()
         self.module_prefetch_issued = set()
 
@@ -860,7 +869,10 @@ class TensorCache:
         self.forward_done_modules.clear()
         self.backward_done_modules.clear()
         self.current_forward_iter += 1
+        if self.prefetch_mode == PrefetchMode.CHUNK_PREFETCH_WHEN_ALL_ARE_DONE:
+            self.current_prefetch_chunk = 0
         self.adaptive_kept_layers_beginning_is_passed = False
+
         # self.offloader.print_loaded_tensors()
 
     def set_forward(self):
@@ -907,11 +919,9 @@ class TensorCache:
         self.current_forward_module_scope_stack.clear()
         if self.saved_forward_done_modules_without_ignored is None:
             self.build_ignored_modules_and_last_modules()
-        # Build module_to_prefetch_list based on saved_forward_done_modules_without_ignored because the saved_forward_done_modules_without_ignored exclude ignored modules
-        if self.prefetch_until_leaf:
-            self.build_module_to_prefetch_list()
-        else:
-            self.build_plain_module_to_prefetch_list()
+        # Build module_to_prefetch_modules based on saved_forward_done_modules_without_ignored because the saved_forward_done_modules_without_ignored exclude ignored modules
+        if self.prefetch_mode != PrefetchMode.DISABLED:
+            self.build_module_to_prefetch_modules()
 
         # self.offloader.wait_for_storing_queue()
         # logger.critical("self.forward_done_modules")
@@ -1119,61 +1129,89 @@ class TensorCache:
             #         return None
             return activation_context
 
-    def build_plain_module_to_prefetch_list(self):
-        if self.saved_forward_done_modules_without_ignored is None:
-            self.build_ignored_modules_and_last_modules()
-        assert self.saved_forward_done_modules_without_ignored is not None
-        # Build module_to_prefetch_list based on saved_forward_done_modules_without_ignored because the saved_forward_done_modules_without_ignored exclude ignored modules
-        self.module_to_prefetch_list = {
-            self.saved_forward_done_modules_without_ignored[idx + 1]: [
-                self.saved_forward_done_modules_without_ignored[idx]
-            ]
-            for idx in range(
-                len(self.saved_forward_done_modules_without_ignored) - 1
-            )
-        }
+    def build_module_to_prefetch_modules(self):
+        assert self.prefetch_mode != PrefetchMode.DISABLED
+        if self.prefetch_mode == PrefetchMode.ONE_AT_A_TIME:
+            # Build module_to_prefetch_modules based on saved_forward_done_modules_without_ignored because the saved_forward_done_modules_without_ignored exclude ignored modules
+            if self.saved_forward_done_modules_without_ignored is None:
+                self.build_ignored_modules_and_last_modules()
+            assert self.saved_forward_done_modules_without_ignored is not None
+            self.module_to_prefetch_modules = {
+                self.saved_forward_done_modules_without_ignored[idx + 1]: [
+                    self.saved_forward_done_modules_without_ignored[idx]
+                ]
+                for idx in range(
+                    len(self.saved_forward_done_modules_without_ignored) - 1
+                )
+            }
+        else:
+            # Build chunk of modules for prefetch first
+            # First, go through self.saved_forward_done_modules from the end to the beginning, and divide the list into chunks where each chunk ends with a leaf module.
+            module_chunks: list[
+                list[ModuleReentrantContext | SavedActivationContext]
+            ] = [[]]
+            current_chunk_num_leaves = 0
+            for module in reversed(self.saved_forward_done_modules):
+                module_chunks[-1].append(module)
+                if len(module_chunks[-1]) == 1:
+                    continue
+                if self.full_scope_tree.is_leaf(module):
+                    current_chunk_num_leaves += 1
+                    if (
+                        current_chunk_num_leaves
+                        == self.prefetch_num_leaves_per_chunk
+                    ):
+                        # Add a new chunk
+                        module_chunks.append([module])
+                        current_chunk_num_leaves = 0
+            if (
+                self.prefetch_mode
+                == PrefetchMode.CHUNK_PREFETCH_ONLY_AT_CHUNK_END
+            ):
+                self.module_to_prefetch_modules = {
+                    module_chunks[idx][0]: module_chunks[idx][1:]
+                    for idx in range(len(module_chunks) - 1)
+                }
+                return
+            elif (
+                self.prefetch_mode
+                == PrefetchMode.CHUNK_PREFETCH_WHEN_ALL_ARE_DONE
+            ):
+                raise NotImplementedError
+            raise ValueError(f"Invalid prefetch mode, {self.prefetch_mode}")
 
-    def build_module_to_prefetch_list(self):
-        self.module_to_prefetch_list = {}
-
-        # First, go through self.saved_forward_done_modules from the end to the beginning, and divide the list into chunks where each chunk ends with a leaf module.
-        module_chunks: list[
-            list[ModuleReentrantContext | SavedActivationContext]
-        ] = [[]]
-        current_chunk_num_leaves = 0
-        for module in reversed(self.saved_forward_done_modules):
-            module_chunks[-1].append(module)
-            if len(module_chunks[-1]) == 1:
-                continue
-            if self.full_scope_tree.is_leaf(module):
-                current_chunk_num_leaves += 1
-                if (
-                    current_chunk_num_leaves
-                    == self.prefetch_num_leaves_per_chunk
-                ):
-                    # Add a new chunk
-                    module_chunks.append([module])
-                    current_chunk_num_leaves = 0
-
-        self.module_to_prefetch_list = {
-            module_chunks[idx][0]: module_chunks[idx][1:]
-            for idx in range(len(module_chunks) - 1)
-        }
+    def get_modules_to_prefetch(
+        self, backward_pre_module: ModuleReentrantContext
+    ):
+        assert self.prefetch_mode != PrefetchMode.DISABLED
+        modules_to_prefetch = [backward_pre_module]
+        if (
+            self.prefetch_mode == PrefetchMode.ONE_AT_A_TIME
+            or self.prefetch_mode
+            == PrefetchMode.CHUNK_PREFETCH_ONLY_AT_CHUNK_END
+        ):
+            if backward_pre_module in self.module_to_prefetch_modules:
+                modules_to_prefetch = self.module_to_prefetch_modules[
+                    backward_pre_module
+                ]
+        elif (
+            self.prefetch_mode == PrefetchMode.CHUNK_PREFETCH_WHEN_ALL_ARE_DONE
+        ):
+            raise NotImplementedError
+        return modules_to_prefetch
 
     def prefetch_next_module_in_backward(
         self, backward_pre_hook_target: torch.nn.Module
     ) -> None:
         """Use post-order traversal to do prefetch according to forward_done_modules"""
-        if len(self.module_to_prefetch_list) == 0:
+        if len(self.module_to_prefetch_modules) == 0:
             logger.warning(
-                "Producing module_to_prefetch_list. It is recommended"
+                "Producing module_to_prefetch_modules. It is recommended"
                 " to call set_backward() before calling"
                 " prefetch_next_module_in_backward()."
             )
-            if self.prefetch_until_leaf:
-                self.build_module_to_prefetch_list()
-            else:
-                self.build_plain_module_to_prefetch_list()
+            if self.prefetch_mode != PrefetchMode.DISABLED:
+                self.build_module_to_prefetch_modules()
 
         backward_pre_module = ModuleReentrantContext(
             module_id=id(backward_pre_hook_target),
@@ -1182,24 +1220,22 @@ class TensorCache:
             )
             - 1,
         )
-        if backward_pre_module in self.module_to_prefetch_list:
-            modules_to_prefetch = self.module_to_prefetch_list[
-                backward_pre_module
-            ]
-            for module_to_prefetch in modules_to_prefetch:
-                if module_to_prefetch in self.module_prefetch_issued:
-                    continue
-                self.module_prefetch_issued.add(module_to_prefetch)
-                if isinstance(module_to_prefetch, SavedActivationContext):
-                    module_to_prefetch = self.activation_checkpoints[
-                        module_to_prefetch.seq_id
-                    ]
-                if module_to_prefetch in self.module_id_to_tensor_ids:
-                    logger.debug(
-                        "Prefetching tensors in backward pre hook"
-                        f" {module_to_prefetch}"
-                    )
-                    self.prefetch_saved_tensors(module_to_prefetch)
+
+        modules_to_prefetch = self.get_modules_to_prefetch(backward_pre_module)
+        for module_to_prefetch in modules_to_prefetch:
+            if module_to_prefetch in self.module_prefetch_issued:
+                continue
+            self.module_prefetch_issued.add(module_to_prefetch)
+            if isinstance(module_to_prefetch, SavedActivationContext):
+                module_to_prefetch = self.activation_checkpoints[
+                    module_to_prefetch.seq_id
+                ]
+            if module_to_prefetch in self.module_id_to_tensor_ids:
+                logger.debug(
+                    "Prefetching tensors in backward pre hook"
+                    f" {module_to_prefetch}"
+                )
+                self.prefetch_saved_tensors(module_to_prefetch)
 
     # TODO: parameterize the function to check if the module is the x-th last modules
     def is_last_module_in_forward(
@@ -1557,7 +1593,7 @@ class TensorCache:
                     # We are doing the backward propagation inside an activation context/reevaluator context. No need to do anything here.
                     # Return here as we don't need to prefetch
                     return
-            if self.enable_prefetch:
+            if self.prefetch_mode != PrefetchMode.DISABLED:
                 self.prefetch_next_module_in_backward(m)
 
         return full_backward_pre_hook
