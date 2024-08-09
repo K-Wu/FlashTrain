@@ -13,7 +13,7 @@ NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 
-# NUM_LAYERS=${NUM_LAYERS:-2}
+
 ENCODER_NUM_LAYERS=${ENCODER_NUM_LAYERS:-2}
 DECODER_NUM_LAYERS=${DECODER_NUM_LAYERS:-2}
 HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
@@ -29,6 +29,20 @@ CHECKPOINT_PATH=./tmp
 VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
 DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 
+T5_ARGS=""
+if [ "${USE_TENSOR_CACHE}" = "true" ]; then
+  T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+fi
+
+if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
+then
+    T5_ARGS="${T5_ARGS} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
+elif [ "${ACTIVATION_CHECKPOINT}" = "full" ] 
+then
+    T5_ARGS="${T5_ARGS} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
+fi
+
+
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
     --nnodes $NNODES \
@@ -37,19 +51,15 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 #    --ffn-hidden-size 3072 \
-#    --profile-first-iter-longer \ 
 #    --profile-first-iter-longer \
 #    --tensor-cache-in-memory-adapter \
-T5_ARGS="
+T5_ARGS="${T5_ARGS} \
     --optimizer sgd \
     --no-bias-gelu-fusion \
-    --enable-tensor-cache \
     --ends-on 12\
     --lossy-offload-first-iter \
     --use-pure-low-precision \
     --use-flash-attn-v2 \
-    --tensor-cache-log-level CRITICAL \
-    --cufile-malloc-hook-is-used \
     --tensor-model-parallel-size 2 \
     --encoder-num-layers ${ENCODER_NUM_LAYERS} \
     --decoder-num-layers ${DECODER_NUM_LAYERS} \

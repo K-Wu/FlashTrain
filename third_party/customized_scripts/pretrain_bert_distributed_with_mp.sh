@@ -115,11 +115,11 @@ EOT
 fi
 
 
-
+BERT_ARGS=""
 #  --tensor-cache-log-level CRITICAL
 # --tensor-cache-in-memory-adapter 
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  BERT_ARGS="--enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]

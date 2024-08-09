@@ -33,63 +33,24 @@ NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
+
+NUM_LAYERS=${NUM_LAYERS:-4}
+HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
+NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-64}
+SEQ_LENGTH=${SEQ_LENGTH:-1024}
+ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
+USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
+TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
+NUM_KV_HEADS=8
+
+
 USE_LLAMA_INSTEAD_OF_GPT="true"
-if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
-  MODEL_SIZE=2048 # TODO: currently unused. Add more model sizes and use MODEL_SIZE to switch between them
-else
-  MODEL_SIZE=117 # 117, 345, 774, 1558 for GPT-2
-fi
-
-# Model hyperparameters
-hyperparam_args=""
-if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
-# TODO: add other model size
-  HIDDEN_SIZE=12288 # e.g. llama-13b: 5120
-  NUM_LAYERS=3 # e.g. llama-13b: 40
-  NUM_ATTN_HEADS=128 # e.g. llama-13b: 40
-  NUM_KV_HEADS=8 # llama2 70B uses GQA
-  # We suppress FFN_HIDDEN_SIZE and use Megatron's default value for swiglu for now.
-  # FFN_HIDDEN_SIZE=5504 # e.g. llama-13b: 13824
-  # Add llama-unique FFN_HIDDEN_SIZE to hyperparam_args. NUM_KV_HEADS will be added later in llama_args
-  # hyperparam_args="${hyperparam_args} --ffn-hidden-size $FFN_HIDDEN_SIZE"
-else # GPT-2
-  # 12-layer, 768-hidden, 12-heads, 117M parameters
-  # 24-layer, 1024-hidden, 16-heads, 345M parameters
-  # 36-layer, 1280-hidden, 20-heads, 774M parameters
-  # 48-layer, 1600-hidden, 25-heads, 1558M parameters
-  if [[ $MODEL_SIZE -eq 117 ]]; then
-          NUM_LAYERS=12
-          HIDDEN_SIZE=768
-          NUM_ATTN_HEADS=12
-  elif [[ $MODEL_SIZE -eq 345 ]]; then
-          NUM_LAYERS=24
-          HIDDEN_SIZE=1024
-          NUM_ATTN_HEADS=16
-  elif [[ $MODEL_SIZE -eq 774 ]]; then
-          NUM_LAYERS=36
-          HIDDEN_SIZE=1280
-          NUM_ATTN_HEADS=20
-  elif [[ $MODEL_SIZE -eq 1558 ]]; then
-          NUM_LAYERS=48
-          HIDDEN_SIZE=1600
-          NUM_ATTN_HEADS=25
-  else
-          echo "Model size not supported."
-          exit 1
-  fi
-  # Override by custom model size
-  NUM_LAYERS=3
-  HIDDEN_SIZE=12288
-  NUM_ATTN_HEADS=128
-fi
-hyperparam_args="${hyperparam_args} --hidden-size $HIDDEN_SIZE --num-layers $NUM_LAYERS --num-attention-heads $NUM_ATTN_HEADS"
+hyperparam_args="--hidden-size $HIDDEN_SIZE --num-layers $NUM_LAYERS --num-attention-heads $NUM_ATTN_HEADS"
 
 
 
-SEQ_LENGTH=1024
-
-MICRO_BATCH_SIZE=16
-GLOBAL_BATCH_SIZE=16 # e.g. llama: 4M tokens
 TRAIN_STEPS=2500 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
 LR=3e-4
 MIN_LR=3e-5
@@ -99,6 +60,17 @@ GRAD_CLIP=1.0
 
 
 llama_args=""
+if [ "${USE_TENSOR_CACHE}" = "true" ]; then
+  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+fi
+
+if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
+then
+    llama_args="${llama_args} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
+elif [ "${ACTIVATION_CHECKPOINT}" = "full" ] 
+then
+    llama_args="${llama_args} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
+fi
 
 if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
   llama_args="${llama_args} --no-query-key-layer-scaling"
@@ -115,14 +87,6 @@ fi
 ######################################
 
 
-ACTIVATION_CHECKPOINT="false"
-if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
-then
-    llama_args="${llama_args} --recompute-granularity selective --recompute-num-layers 1 --recompute-method uniform "
-elif [ "${ACTIVATION_CHECKPOINT}" = "full" ] 
-then
-    llama_args="${llama_args} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
-fi
 
 ENABLE_DEEPSPEED="false"
 ds_args=""
@@ -144,7 +108,8 @@ EOT
   ds_args=" --deepspeed_config=$DS_CONFIG ${ds_args}"
   ds_args=" --zero-stage=$ZERO_STAGE ${ds_args}"
 
-  if [ "${ACTIVATION_CHECKPOINT}" = "true" ]; then
+  if [ "${ACTIVATION_CHECKPOINT}" = "selective" ] || [ "${ACTIVATION_CHECKPOINT}" = "full"  ]
+  then
     ds_args="--deepspeed-activation-checkpointing ${ds_args}"
 
     ## Don't use the following old argument for recomputing the transformer layer!
@@ -166,20 +131,18 @@ SCRIPTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd )"
 export KVIKIO_COMPAT_MODE=0
 export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
 
+#      --profile-first-iter-longer \
 #      --tensor-cache-in-memory-adapter \
-#       --tensor-cache-reset-in-every-iteration \
+#      --tensor-cache-reset-in-every-iteration \
 # /usr/local/cuda-12.1/bin/nsys profile -o pretrain_gpt_distributed --force-overwrite true  --trace=cuda,nvtx --sample=cpu --cuda-memory-usage true \
 torchrun $DISTRIBUTED_ARGS \
        "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_gpt.py \
        --ends-on 12 \
-       --enable-tensor-cache \
        --optimizer sgd \
        --lossy-offload-first-iter \
        --fp16-lm-cross-entropy \
        --use-pure-low-precision \
        --use-flash-attn-v2 \
-       --tensor-cache-log-level CRITICAL \
-       --cufile-malloc-hook-is-used \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \
        $hyperparam_args \
