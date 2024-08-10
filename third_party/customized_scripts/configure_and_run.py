@@ -27,6 +27,12 @@ def get_parser() -> argparse.ArgumentParser:
         description="Configure and run pretraining script"
     )
     parser.add_argument(
+        "--output_path",
+        type=str,
+        default=None,
+        help="Path to store the output log file",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         choices=["bert", "t5", "llama"],
@@ -143,10 +149,14 @@ def get_output_name(args: argparse.Namespace) -> str:
     for k, v in vars(args).items():
         # Normalize the keyword by extracting the first letter of each word
         key_values["".join([x[0] for x in k.split("_")]).upper()] = str(v)
-    return "_".join([f"{k}.{v}" for k, v in key_values.items()]) + ".log"
+    result = "_".join([f"{k}.{v}" for k, v in key_values.items()]) + ".log"
+    if args.output_path is None:
+        return result
+    else:
+        return os.path.join(args.output_path, result)
 
 
-def execute_with(args):
+def execute_with(args: argparse.Namespace):
     # Source script to pass arguments, environment variables and start the pretraining
     # TODO: add knob to enable/disable PYTORCH_CUDA_ALLOC_CONF
     # Adapted from https://stackoverflow.com/a/78115585/5555077
@@ -163,6 +173,7 @@ def execute_with(args):
         "    python configure_and_run.py "
         + " ".join([f"--{k} {v}" for k, v in vars(args).items()])
     )
+    # print(env_vars)
 
     with open(get_output_name(args), "w") as f:
         subprocess.call(
@@ -174,6 +185,11 @@ def execute_with(args):
 
     # Clean up the SSD storage between two runs
     subprocess.run(["bash", CLEAN_UP_SCRIPT_PATH])
+
+
+def batch_execute_with(tasks: list[argparse.Namespace]):
+    for task in tasks:
+        execute_with(task)
 
 
 if __name__ == "__main__":
