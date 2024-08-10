@@ -71,17 +71,15 @@ DISTRIBUTED_ARGS="
 # NUM_ATTN_HEADS=32
 # NUM_ATTN_HEADS=64
 
-NUM_LAYERS=${NUM_LAYERS:-3}
-HIDDEN_SIZE=${HIDDEN_SIZE:-12288}
-NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-128}
+NUM_LAYERS=${NUM_LAYERS:-4}
+HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
+NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-64}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
 USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
 GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
 TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
-DISABLE_ADAPTIVE_KEEP="${DISABLE_ADAPTIVE_KEEP:-false}"
-DISABLE_ADAPTIVE_KEEP_PASSIVE="${DISABLE_ADAPTIVE_KEEP_PASSIVE:-false}"
 
 ZERO_STAGE=0
 INIT_STD=0.02
@@ -132,15 +130,6 @@ then
     BERT_ARGS="${BERT_ARGS} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
 fi
 
-if [ "${DISABLE_ADAPTIVE_KEEP}" = "true" ]
-then
-    BERT_ARGS="${BERT_ARGS} --disable-adaptive-keep "
-fi
-
-if [ "${DISABLE_ADAPTIVE_KEEP_PASSIVE}" = "true" ]
-then
-    BERT_ARGS="${BERT_ARGS} --disable-adaptive-keep-passive "
-fi
 
 
 # --profile-memory-beginning \
@@ -150,6 +139,9 @@ fi
 # --use-distributed-optimizer \
 
 BERT_ARGS="${BERT_ARGS} \
+    --profile-memory-beginning \
+    --disable-adaptive-keep \
+    --disable-adaptive-keep-passive \
     --optimizer sgd\
     --ends-on 12\
     --lossy-offload-first-iter \

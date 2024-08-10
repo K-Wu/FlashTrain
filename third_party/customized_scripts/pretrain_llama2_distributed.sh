@@ -44,7 +44,8 @@ GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
 TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
 NUM_KV_HEADS=8
-
+DISABLE_ADAPTIVE_KEEP="${DISABLE_ADAPTIVE_KEEP:-false}"
+DISABLE_ADAPTIVE_KEEP_PASSIVE="${DISABLE_ADAPTIVE_KEEP_PASSIVE:-false}"
 
 USE_LLAMA_INSTEAD_OF_GPT="true"
 hyperparam_args="--hidden-size $HIDDEN_SIZE --num-layers $NUM_LAYERS --num-attention-heads $NUM_ATTN_HEADS"
@@ -86,6 +87,12 @@ if [ "${USE_LLAMA_INSTEAD_OF_GPT}" = "true" ]; then
 fi
 ######################################
 
+if [ "${DISABLE_ADAPTIVE_KEEP}" = "true" ]; then
+  llama_args="${llama_args} --disable-adaptive-keep"
+fi
+if [ "${DISABLE_ADAPTIVE_KEEP_PASSIVE}" = "true" ]; then
+  llama_args="${llama_args} --disable-adaptive-keep-passive"
+fi
 
 
 ENABLE_DEEPSPEED="false"

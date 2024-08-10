@@ -410,8 +410,8 @@ class TensorCache:
         adaptive_keep: bool = True,
         nvtx_enabled: bool = False,
         # By default, do the profiling in the second micro-batch until the third micro-batch (not including the end_iter). We skip the first micro-batch because it is used to measure host pinned memory use.
-        adaptive_keep_profiling_begin_iter: int = 2,
-        adaptive_keep_profiling_end_iter: int = 3,
+        adaptive_keep_profiling_begin_iter: int = 5,
+        adaptive_keep_profiling_end_iter: int = 7,
         # The module names of each layer that tensor cache should track. The last few layers will be kept in the GPU memory.
         # Coarser granularity {"ParallelTransformerlayer"}
         # Finer granularity {"ParallelAttention", "ParallelMLP"}

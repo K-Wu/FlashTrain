@@ -24,6 +24,8 @@ USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
 GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
 TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
+DISABLE_ADAPTIVE_KEEP="${DISABLE_ADAPTIVE_KEEP:-false}"
+DISABLE_ADAPTIVE_KEEP_PASSIVE="${DISABLE_ADAPTIVE_KEEP_PASSIVE:-false}"
 
 CHECKPOINT_PATH=./tmp
 VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
@@ -40,6 +42,15 @@ then
 elif [ "${ACTIVATION_CHECKPOINT}" = "full" ] 
 then
     T5_ARGS="${T5_ARGS} --recompute-granularity full --recompute-num-layers 1 --recompute-method uniform "
+fi
+
+if [ "${DISABLE_ADAPTIVE_KEEP}" = "true" ]
+then
+    T5_ARGS="${T5_ARGS} --disable-adaptive-keep "
+fi
+if [ "${DISABLE_ADAPTIVE_KEEP_PASSIVE}" = "true" ]
+then
+    T5_ARGS="${T5_ARGS} --disable-adaptive-keep-passive "
 fi
 
 

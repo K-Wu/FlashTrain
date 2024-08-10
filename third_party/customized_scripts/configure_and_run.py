@@ -105,6 +105,20 @@ def get_parser() -> argparse.ArgumentParser:
             " micro-batches."
         ),
     )  # (GLOBAL_BATCH_SIZE)
+    parser.add_argument(
+        "--disable-adaptive-keep",
+        type=str,
+        choices=["true", "false"],
+        default="false",
+        help="Disable adaptive keep in PeakTrackNoIOLossyAdapter.",
+    )
+    parser.add_argument(
+        "--disable-adaptive-keep-passive",
+        type=str,
+        choices=["true", "false"],
+        default="false",
+        help="Disable adaptive keep in async_save_tensor in adapters .",
+    )
 
     # TODO: --num-key-value-heads ($NUM_KV_HEADS) specific to llama (fix at 8 in the bash script for now but add this as a flag in the future)
     return parser
@@ -133,6 +147,8 @@ def get_hyperparams_as_env_vars(args: argparse.Namespace) -> dict:
         "NUM_LAYERS": str(args.num_layers),
         "MICRO_BATCH_SIZE": str(args.micro_batch_size),
         "GLOBAL_BATCH_SIZE": str(args.global_batch_size),
+        "DISABLE_ADAPTIVE_KEEP": args.disable_adaptive_keep,
+        "DISABLE_ADAPTIVE_KEEP_PASSIVE": args.disable_adaptive_keep_passive,
     }
 
     # For T5, set --decoder-num-layers and --encoder-num-layers as half of args.num_layers
