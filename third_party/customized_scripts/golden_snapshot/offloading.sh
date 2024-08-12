@@ -71,9 +71,9 @@ DISTRIBUTED_ARGS="
 # NUM_ATTN_HEADS=32
 # NUM_ATTN_HEADS=64
 
-NUM_LAYERS=${NUM_LAYERS:-4}
+NUM_LAYERS=${NUM_LAYERS:-5}
 HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
-NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-64}
+NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-32}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
 USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
@@ -205,7 +205,7 @@ export KVIKIO_COMPAT_MODE=0
 export LD_PRELOAD=/home/kunwu2/FlashTrain/flashtrain/malloc_hook/hook.so
 
 # /usr/local/cuda-12.1/bin/nsys profile -o pretrain_bert_distributed --force-overwrite true  --trace=cuda,nvtx --sample=cpu --cuda-memory-usage true \
-torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../Megatron-DeepSpeed/pretrain_bert.py \
+torchrun $DISTRIBUTED_ARGS "$SCRIPTDIR"/../../Megatron-DeepSpeed/pretrain_bert.py \
     $BERT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
