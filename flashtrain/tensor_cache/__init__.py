@@ -4,6 +4,7 @@ import ctypes
 
 __GLOBAL_TENSOR_CACHE = None
 __GLOBAL_MEMORY_USE_STATS_RECORDER: Optional[dict[str, int]] = None
+__GLOBAL_TIMING_STATS_RECORDER: Optional[dict[str, float]] = None
 __GLOBAL_CUFILE_MALLOC_HOOK = None
 
 
@@ -30,7 +31,7 @@ def get_tensor_cache():
 
 
 def get_memory_use_stats_recorder():
-    """Return timers."""
+    """Return memory use stats."""
     _ensure_var_is_initialized(
         __GLOBAL_MEMORY_USE_STATS_RECORDER, "memory use stats recorder"
     )
@@ -38,12 +39,29 @@ def get_memory_use_stats_recorder():
 
 
 def init_memory_use_stats_recorder():
-    """Initialize timers."""
+    """Initialize memory use stats."""
     global __GLOBAL_MEMORY_USE_STATS_RECORDER
     _ensure_var_is_not_initialized(
         __GLOBAL_MEMORY_USE_STATS_RECORDER, "memory use stats recorder"
     )
     __GLOBAL_MEMORY_USE_STATS_RECORDER = dict()
+
+
+def get_timing_stats_recorder():
+    """Return memory use stats. We didn't use Megatron's timer because it is too difficult to use."""
+    _ensure_var_is_initialized(
+        __GLOBAL_TIMING_STATS_RECORDER, "memory use stats recorder"
+    )
+    return __GLOBAL_TIMING_STATS_RECORDER
+
+
+def init_timing_stats_recorder():
+    """Initialize timing stats. We didn't use Megatron's timer because it is too difficult to use."""
+    global __GLOBAL_TIMING_STATS_RECORDER
+    _ensure_var_is_not_initialized(
+        __GLOBAL_TIMING_STATS_RECORDER, "memory use stats recorder"
+    )
+    __GLOBAL_TIMING_STATS_RECORDER = dict()
 
 
 def init_cufile_malloc_hook():
