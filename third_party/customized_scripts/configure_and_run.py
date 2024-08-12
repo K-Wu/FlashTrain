@@ -1,11 +1,13 @@
 import subprocess
 import os
 import argparse
+from flashtrain.logger import logger
 
 SCRIPTS = {
     "bert": "pretrain_bert.sh",
     "bert-mp": "pretrain_bert_distributed_with_mp.sh",
-    "llama-mp": "pretrain_llama_distributed_with_mp.sh",
+    "llama-mp": "pretrain_llama2_distributed.sh",
+    "gpt-mp": "pretrain_llama2_distributed.sh",
     "t5-mp": "pretrain_t5_distributed_with_mp.sh",
 }
 CLEAN_UP_SCRIPT_PATH = os.path.join(
@@ -35,14 +37,14 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["bert", "t5", "llama"],
+        choices=["bert", "t5", "llama", "gpt"],
         default="bert",
         help="Model to pretrain",
     )
     parser.add_argument(
         "--use_tensor_cache",
         type=str,
-        choices=["true", "false"],
+        choices=["true", "memory", "false"],
         default="false",
         help="Use tensor cache",
     )  # (USE_TENSOR_CACHE)
@@ -106,14 +108,14 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )  # (GLOBAL_BATCH_SIZE)
     parser.add_argument(
-        "--disable-adaptive-keep",
+        "--disable_adaptive_keep",
         type=str,
         choices=["true", "false"],
         default="false",
         help="Disable adaptive keep in PeakTrackNoIOLossyAdapter.",
     )
     parser.add_argument(
-        "--disable-adaptive-keep-passive",
+        "--disable_adaptive_keep_passive",
         type=str,
         choices=["true", "false"],
         default="false",
@@ -151,10 +153,13 @@ def get_hyperparams_as_env_vars(args: argparse.Namespace) -> dict:
         "DISABLE_ADAPTIVE_KEEP_PASSIVE": args.disable_adaptive_keep_passive,
     }
 
+    if args.model == "llama":
+        hyper_params["USE_LLAMA_INSTEAD_OF_GPT"] = "true"
+
     # For T5, set --decoder-num-layers and --encoder-num-layers as half of args.num_layers
     if args.model == "t5":
-        hyper_params["DECODER_NUM_LAYERS"] = (args.num_layers + 1) // 2
-        hyper_params["ENCODER_NUM_LAYERS"] = args.num_layers // 2
+        hyper_params["DECODER_NUM_LAYERS"] = str(args.num_layers // 2)
+        hyper_params["ENCODER_NUM_LAYERS"] = str((args.num_layers + 1) // 2)
         del hyper_params["NUM_LAYERS"]
 
     return hyper_params
@@ -163,6 +168,8 @@ def get_hyperparams_as_env_vars(args: argparse.Namespace) -> dict:
 def get_output_name(args: argparse.Namespace) -> str:
     key_values = dict()
     for k, v in vars(args).items():
+        if k == "output_path":
+            continue
         # Normalize the keyword by extracting the first letter of each word
         key_values["".join([x[0] for x in k.split("_")]).upper()] = str(v)
     result = "_".join([f"{k}.{v}" for k, v in key_values.items()]) + ".log"
@@ -183,14 +190,14 @@ def execute_with(args: argparse.Namespace):
             "PYTORCH_CUDA_ALLOC_CONF": "pinned_use_cuda_host_register:True,pinned_num_register_threads:8"
         }
     )
-    print("Output written to", get_output_name(args))
-    print("    To reexecute the same command, run:")
+    print("Output written to", get_output_name(args), flush=True)
+    print("    To reexecute the same command, run:", flush=True)
     print(
         "    python configure_and_run.py "
-        + " ".join([f"--{k} {v}" for k, v in vars(args).items()])
+        + " ".join([f"--{k} {v}" for k, v in vars(args).items()]),
+        flush=True,
     )
     # print(env_vars)
-
     with open(get_output_name(args), "w") as f:
         subprocess.call(
             ["bash", SCRIPTS[args.model + "-mp"]],
@@ -198,9 +205,19 @@ def execute_with(args: argparse.Namespace):
             stdout=f,
             stderr=f,
         )
+    try:
+        with open(get_output_name(args), "w") as f:
+            subprocess.call(
+                ["bash", SCRIPTS[args.model + "-mp"]],
+                env=env_vars,
+                stdout=f,
+                stderr=f,
+            )
 
-    # Clean up the SSD storage between two runs
-    subprocess.run(["bash", CLEAN_UP_SCRIPT_PATH])
+        # Clean up the SSD storage between two runs
+        subprocess.run(["bash", CLEAN_UP_SCRIPT_PATH])
+    except Exception as e:
+        print("Execution failed with error ", e, " for ", args, flush=True)
 
 
 def batch_execute_with(tasks: list[argparse.Namespace]):

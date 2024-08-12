@@ -40,14 +40,14 @@ NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-64}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
 USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
-GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
-MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-8}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-8}
 TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
 NUM_KV_HEADS=8
 DISABLE_ADAPTIVE_KEEP="${DISABLE_ADAPTIVE_KEEP:-false}"
 DISABLE_ADAPTIVE_KEEP_PASSIVE="${DISABLE_ADAPTIVE_KEEP_PASSIVE:-false}"
 
-USE_LLAMA_INSTEAD_OF_GPT="true"
+USE_LLAMA_INSTEAD_OF_GPT="${USE_LLAMA_INSTEAD_OF_GPT:-false}"
 hyperparam_args="--hidden-size $HIDDEN_SIZE --num-layers $NUM_LAYERS --num-attention-heads $NUM_ATTN_HEADS"
 
 
@@ -63,6 +63,8 @@ GRAD_CLIP=1.0
 llama_args=""
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
   llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+elif [ "${USE_TENSOR_CACHE}" = "memory" ]; then
+  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]

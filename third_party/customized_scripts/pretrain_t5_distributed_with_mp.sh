@@ -17,7 +17,7 @@ WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 ENCODER_NUM_LAYERS=${ENCODER_NUM_LAYERS:-2}
 DECODER_NUM_LAYERS=${DECODER_NUM_LAYERS:-2}
 HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
-NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-128}
+NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-64}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
 USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
@@ -34,6 +34,8 @@ DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 T5_ARGS=""
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
   T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+elif [ "${USE_TENSOR_CACHE}" = "memory" ]; then
+  T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
