@@ -38,10 +38,13 @@ def create_new_filename(
 class AdapterBase(metaclass=ABCMeta):
     lock: threading.Lock
     disable_adaptive_keep_passive: bool
+    adaptive_kept_layers_beginning_is_passed: bool
 
     def __init__(self):
         self.lock = threading.Lock()
         self.disable_adaptive_keep_passive = False
+        # This flag is set True when adaptive_keep is on. Only when adaptive profile is done will adaptive_keep_passive functionality be activated.
+        self.adaptive_kept_layers_beginning_is_passed = True
 
     @abstractmethod
     def create_new_filename(
@@ -77,8 +80,10 @@ class AdapterBase(metaclass=ABCMeta):
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
         event: torch.cuda.Event,
     ):
-        if tensor_id in tensor_id_to_loaded_tensor and (
-            not self.disable_adaptive_keep_passive
+        if (
+            tensor_id in tensor_id_to_loaded_tensor
+            and (not self.disable_adaptive_keep_passive)
+            and self.adaptive_kept_layers_beginning_is_passed
         ):
             # The entry is already forwarded to the next process. We don't need to save this tensor
             logger.critical(
@@ -87,12 +92,15 @@ class AdapterBase(metaclass=ABCMeta):
             with self.lock:
                 if tensor_id in tensor_being_stored:
                     del tensor_being_stored[tensor_id]
+            del tensor
             return
         self.save_tensor(tensor, path, event, tensor_id_to_loaded_tensor)
         logger.debug(f"Async wrapper saved tensor {tensor_id}")
         with self.lock:
             if tensor_id in tensor_being_stored:
                 del tensor_being_stored[tensor_id]
+
+        del tensor
 
     @abstractmethod
     def load_tensor(
@@ -146,6 +154,7 @@ class AdapterBase(metaclass=ABCMeta):
         with self.lock:
             tensor_id_to_loaded_tensor[tensor_id] = loaded
             del tensor_being_loaded[tensor_id]
+        del loaded
 
     # TODO: implement clean_up_when_end to delete files
     def clean_up_in_backward(
@@ -164,6 +173,7 @@ class TorchBuiltinIOAdapter(AdapterBase):
     current_stream_idx: int
     lock: threading.Lock  # Inherited from AdapterBase
     disable_adaptive_keep_passive: bool  # Inherited from AdapterBase
+    adaptive_kept_layers_beginning_is_passed: bool  # Inherited from AdapterBase
 
     def __init__(self, path: str = "/tmp", num_streams: int = 2):
         super().__init__()
@@ -266,6 +276,7 @@ class KvikioIOAdapter(AdapterBase):
     path: str
     lock: threading.Lock  # Inherited from AdapterBase
     disable_adaptive_keep_passive: bool  # Inherited from AdapterBase
+    adaptive_kept_layers_beginning_is_passed: bool  # Inherited from AdapterBase
     is_async: bool
     streams: list[torch.cuda.Stream] | None
     current_stream_idx: int | None
@@ -358,7 +369,7 @@ class KvikioIOAdapter(AdapterBase):
             else:
                 with self.lock:
                     if self.is_being_profiled:
-                        self.start_timestamp.append(time.time())
+                        self.start_timestamp.append(time.monotonic())
 
             with kvikio.CuFile(path, "w") as f:
                 if self.is_async:
@@ -374,10 +385,19 @@ class KvikioIOAdapter(AdapterBase):
                     event.record(store_stream)
                     event.synchronize()
                 else:
+                    # Need to switch off cufile API aggressive check
+                    # f.raw_write(tensor_cupy)
+                    # logger.critical(f"num threads kvikio: {kvikio.defaults.get_num_threads()}")
+                    # f.write(tensor_cupy, task_size=tensor_cupy.nbytes)
                     future = f.pwrite(
                         tensor_cupy  # , task_size=tensor_cupy.nbytes
                     )
                     future.get()
+
+            if not self.is_async:
+                with self.lock:
+                    if self.is_being_profiled:
+                        self.end_timestamp.append(time.monotonic())
 
         except Exception as e:
             logger.critical(f"Error in saving tensor to path {path}: {e}")
@@ -385,10 +405,6 @@ class KvikioIOAdapter(AdapterBase):
             "Kvikio Saved tensor"
             f" {get_oneline_str(tensor_cupy, verbose_only=True)} ({TensorEqID.from_tensor(tensor)})"
         )
-        if not self.is_async:
-            with self.lock:
-                if self.is_being_profiled:
-                    self.end_timestamp.append(time.time())
 
     def load_tensor(
         self,
@@ -426,7 +442,8 @@ class KvikioIOAdapter(AdapterBase):
                         self.current_stream_idx + 1
                     ) % len(self.streams)
 
-            with kvikio.CuFile(path, "r+") as f:
+            flag = "r+" if self.is_async else "r"
+            with kvikio.CuFile(path, flag) as f:
                 if self.is_async:
                     future = f.raw_read_async(tensor, load_stream.cuda_stream)
                     # future.check_bytes_done()
@@ -436,6 +453,7 @@ class KvikioIOAdapter(AdapterBase):
                     event.record(load_stream)
                     event.synchronize()
                 else:
+                    # f.read(tensor, task_size = tensor.numel() * tensor.element_size())
                     future = f.pread(
                         tensor,
                         # task_size=tensor.numel() * tensor.element_size(),
@@ -463,6 +481,7 @@ class TorchMainMemoryIOAdapter(AdapterBase):
     current_stream_idx: int
     lock: threading.Lock  # Inherited from AdapterBase
     disable_adaptive_keep_passive: bool  # Inherited from AdapterBase
+    adaptive_kept_layers_beginning_is_passed: bool  # Inherited from AdapterBase
     use_host_pinned_memory_allocator: bool
     host_pinned_memory_allocator: MemoryAllocatorBase | None
 
@@ -630,6 +649,7 @@ class PeakTrackNoIOLossyAdapter(AdapterBase):
 
     lock: threading.Lock  # Inherited from AdapterBase
     disable_adaptive_keep_passive: bool  # Inherited from AdapterBase
+    adaptive_kept_layers_beginning_is_passed: bool  # Inherited from AdapterBase
     peak_tracker: PeakMemoryTracker
 
     def __init__(self):
@@ -679,6 +699,7 @@ class TorchDummyIOAdapter(AdapterBase):
 
     lock: threading.Lock  # Inherited from AdapterBase
     disable_adaptive_keep_passive: bool  # Inherited from AdapterBase
+    adaptive_kept_layers_beginning_is_passed: bool  # Inherited from AdapterBase
     gpu_tensor_cache: dict[
         tuple[str, torch.Size, torch.dtype, torch.device], torch.Tensor
     ]
@@ -750,6 +771,7 @@ class TorchDummyIOAdapter(AdapterBase):
 class RevolverIOAdapter(AdapterBase):
     lock: threading.Lock  # Inherited from AdapterBase
     disable_adaptive_keep_passive: bool  # Inherited from AdapterBase
+    adaptive_kept_layers_beginning_is_passed: bool  # Inherited from AdapterBase
     adapters: list[KvikioIOAdapter | Any]
     storage_adapters_id: int
 
@@ -811,8 +833,10 @@ class RevolverIOAdapter(AdapterBase):
         tensor_being_stored: dict[TensorEqID, concurrent.futures.Future],
         event: torch.cuda.Event,
     ):
-        if tensor_id in tensor_id_to_loaded_tensor and (
-            not self.disable_adaptive_keep_passive
+        if (
+            tensor_id in tensor_id_to_loaded_tensor
+            and (not self.disable_adaptive_keep_passive)
+            and self.adaptive_kept_layers_beginning_is_passed
         ):
             # The entry is already forwarded to the next process. We don't need to save this tensor
             with self.lock:

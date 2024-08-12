@@ -22,6 +22,10 @@ from typing import Optional
 
 class OffloadEngineBase(metaclass=ABCMeta):
     @abstractmethod
+    def restart_executors(self):
+        raise NotImplementedError
+
+    @abstractmethod
     def add_tensor_to_store(
         self,
         tensor_id: TensorEqID,
@@ -88,6 +92,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
     ]
     # TODO: delete files specified in filename_finished_use in the end of the program.
     filename_finished_use: set[str]
+    max_workers: int
 
     lock: threading.Lock
 
@@ -103,6 +108,7 @@ class ThreadedOffloadEngine(OffloadEngineBase):
         max_workers: int = 1,
         log_level: int = logging.INFO,
     ):
+        self.max_workers = max_workers
         self.store_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=(max_workers + 1) // 2
         )
@@ -122,6 +128,16 @@ class ThreadedOffloadEngine(OffloadEngineBase):
 
         # Set the log level as the one passed in because this class may be instantiated in a different process.
         logger.setLevel(log_level)
+
+    def restart_executors(self):
+        self.store_executor.shutdown()
+        self.load_executor.shutdown()
+        self.store_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=(self.max_workers + 1) // 2
+        )
+        self.load_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=(self.max_workers + 1) // 2
+        )
 
     def switch_to_peak_track_adapter(self):
         self.original_adapter = self.adapter
@@ -294,6 +310,7 @@ class CommandType(Enum):
     SWITCH_TO_DUMMY_ADAPTER = 10
     CLEAR_TENSOR_ID_TO_LOADED_TENSOR = 11
     GET_NUM_TENSORS_BEING_LOADED = 12
+    RESTART_EXECUTORS = 13
 
 
 # @thread_wrapped_func
@@ -350,6 +367,9 @@ def engine_main_loop(
             case CommandType.GET_NUM_TENSORS_BEING_LOADED:
                 result = engine.get_num_tensors_being_loaded()
                 result_queue.put(result)
+            case CommandType.RESTART_EXECUTORS:
+                engine.restart_executors()
+                result_queue.put("Done")
             case CommandType.TERMINATE:
                 break
             case _:
@@ -465,6 +485,10 @@ class ProcessOffloadEngine(OffloadEngineBase):
         self.command_queue.put((CommandType.GET_NUM_TENSORS_BEING_LOADED, ()))
         return self.result_queue.get()
 
+    def restart_executors(self):
+        self.command_queue.put((CommandType.RESTART_EXECUTORS, ()))
+        self.result_queue.get()
+
 
 class OffloadHost:
     # This object stores 1) tensors that bypass offloading because a tensor shall not be passed to another process and then back to the original process, and 2) tensors in self.engine.tensor_id_to_loaded_tensor and once returned by self.get_loaded_tensor().
@@ -508,10 +532,11 @@ class OffloadHost:
                 isinstance(adapter, RevolverIOAdapter)
                 and isinstance(adapter.adapters[0], KvikioIOAdapter)
             ):
-                max_workers = kvikio.defaults.get_num_threads()
+                # max_workers = kvikio.defaults.get_num_threads() * 1.5
+                max_workers = 16
             else:
                 max_workers = 4
-
+        logger.critical(f"max_workers is {max_workers}")
         if engine_type == self.EngineType.PROCESS:
             self.engine = ProcessOffloadEngine(
                 adapter, max_workers, logger.getEffectiveLevel()
@@ -533,16 +558,21 @@ class OffloadHost:
                 tensor = self.tensor_id_to_tensor_to_store[tensor_id]()
                 logger.info(f"Get tensor {tensor_id} from memory")
                 if not tensor is None:
+                    tensor._fix_weakref()
                     if not tensor_id in self.tensor_id_to_loaded_tensor:
-                        self.tensor_id_to_loaded_tensor[tensor_id] = tensor
-                    return tensor
+                        self.tensor_id_to_loaded_tensor[
+                            tensor_id
+                        ] = tensor.detach()
+                    return tensor.detach()
 
         if not tensor_id in self.tensor_id_to_loaded_tensor:
             # TODO: avoid load twice
             result_tensor = self.engine.get_loaded_tensor(tensor_id)
             # We need to ensure thread-safety during the backward pass.
             with self.lock:
-                self.tensor_id_to_loaded_tensor[tensor_id] = result_tensor
+                self.tensor_id_to_loaded_tensor[
+                    tensor_id
+                ] = result_tensor.detach()
 
         return self.tensor_id_to_loaded_tensor[tensor_id]
 
@@ -585,7 +615,10 @@ class OffloadHost:
                     # Try to get the tensor from memory if it is not removed after forward pass.
                     tensor = self.tensor_id_to_tensor_to_store[tensor_id]()
                     if tensor is not None:  # The tensor is in memory.
-                        self.tensor_id_to_loaded_tensor[tensor_id] = tensor
+                        tensor._fix_weakref()
+                        self.tensor_id_to_loaded_tensor[
+                            tensor_id
+                        ] = tensor.detach()
                     else:  # The tensor is not in memory.
                         tensor_id_to_load.add(tensor_id)
                 # else: The tensor is loaded into self.tensor_id_to_loaded_tensor. Do nothing.

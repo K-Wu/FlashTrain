@@ -15,36 +15,36 @@ HOSTNAMES_TO_CONFIGS = {
     "bafs-01": {
         "adapter": [
             [
-                (
-                    KvikioIOAdapter,
-                    {
-                        "path": "/mnt/md3/kunwu2/FlashTrain_temp/",
-                        "is_async": False,
-                    },
-                ),
                 # (
                 #     KvikioIOAdapter,
                 #     {
-                #         "path": "/mnt/md5/kunwu2/FlashTrain_temp/",
+                #         "path": "/mnt/md3/kunwu2/FlashTrain_temp/",
                 #         "is_async": False,
                 #     },
-                # )
+                # ),
+                (
+                    KvikioIOAdapter,
+                    {
+                        "path": "/mnt/md5/kunwu2/FlashTrain_temp/",
+                        "is_async": False,
+                    },
+                )
             ],  # Rank 0
             [
-                (
-                    KvikioIOAdapter,
-                    {
-                        "path": "/mnt/md2/kunwu2/FlashTrain_temp/",
-                        "is_async": False,
-                    },
-                ),
                 # (
                 #     KvikioIOAdapter,
                 #     {
-                #         "path": "/mnt/md4/kunwu2/FlashTrain_temp/",
+                #         "path": "/mnt/md2/kunwu2/FlashTrain_temp/",
                 #         "is_async": False,
                 #     },
-                # )
+                # ),
+                (
+                    KvikioIOAdapter,
+                    {
+                        "path": "/mnt/md4/kunwu2/FlashTrain_temp/",
+                        "is_async": False,
+                    },
+                )
             ],  # Rank 1
         ],
     },
@@ -96,7 +96,7 @@ def get_adapter():
         )
 
     num_kvikio_threads = sum(
-        [8 for c in class_and_kwargs if c[0] == KvikioIOAdapter]
+        [3 for c in class_and_kwargs if c[0] == KvikioIOAdapter]
     )
     if num_kvikio_threads > 0:
         kvikio.defaults.num_threads_reset(num_kvikio_threads)
@@ -104,5 +104,5 @@ def get_adapter():
             "Setting kvikio threads to"
             f" {num_kvikio_threads} {kvikio.defaults.get_num_threads()}"
         )
-        kvikio.defaults.task_size_reset(67108864)
+        kvikio.defaults.task_size_reset(67108864 * 8)
     return results

@@ -180,6 +180,7 @@ class TensorCache:
     adaptive_keep: bool
     adaptive_keep_profiling_begin_iter: int
     adaptive_keep_profiling_end_iter: int
+    adaptive_keep_write_bandwidth_overwrite: Optional[float]
     current_forward_iter: int
     # current_prefetch_chunk is to track the current chunk of leaves to prefetch in the backward pass.
     current_prefetch_chunk: int
@@ -350,6 +351,9 @@ class TensorCache:
             self.adaptive_keep_modules_data["all"]["historical_compute_time"]
         )
         bandwidth = self.measured_activation_gpu_memory_size / forward_IO_time
+        if self.adaptive_keep_write_bandwidth_overwrite is not None:
+            bandwidth = self.adaptive_keep_write_bandwidth_overwrite
+        logger.critical(f"Bandwidth: {bandwidth}")
 
         tree = self.adaptive_keep_modules_data["all"]["tree"]
         tree.print_nodes()
@@ -410,8 +414,12 @@ class TensorCache:
         adaptive_keep: bool = True,
         nvtx_enabled: bool = False,
         # By default, do the profiling in the second micro-batch until the third micro-batch (not including the end_iter). We skip the first micro-batch because it is used to measure host pinned memory use.
-        adaptive_keep_profiling_begin_iter: int = 5,
-        adaptive_keep_profiling_end_iter: int = 7,
+        adaptive_keep_profiling_begin_iter: int = 2,
+        adaptive_keep_profiling_end_iter: int = 3,
+        # This threshold overwrites the bandwidth estimated by (forward IO time) / (forward total data amount). Unit: KB/s
+        adaptive_keep_write_bandwidth_overwrite: Optional[
+            float
+        ] = None,  # 12.0 * 1024 * 1024,
         # The module names of each layer that tensor cache should track. The last few layers will be kept in the GPU memory.
         # Coarser granularity {"ParallelTransformerlayer"}
         # Finer granularity {"ParallelAttention", "ParallelMLP"}
@@ -464,6 +472,9 @@ class TensorCache:
         self.adaptive_keep_profiling_end_iter = (
             adaptive_keep_profiling_end_iter
         )
+        self.adaptive_keep_write_bandwidth_overwrite = (
+            adaptive_keep_write_bandwidth_overwrite
+        )
         self.current_forward_iter = 0
         if prefetch_mode == PrefetchMode.CHUNK_PREFETCH_WHEN_ALL_ARE_DONE:
             self.current_prefetch_chunk = 0
@@ -477,7 +488,8 @@ class TensorCache:
                 if isinstance(adapter, KvikioIOAdapter) and (
                     not adapter.is_async
                 ):
-                    adapter.is_being_profiled = True
+                    with adapter.lock:
+                        adapter.is_being_profiled = True
 
         self.adaptive_keep_layer_names_in_track = (
             adaptive_keep_layer_names_in_track
@@ -525,6 +537,12 @@ class TensorCache:
         self.offloader = OffloadHost(
             engine_type=OffloadHost.EngineType.THREAD, adapter=adapter
         )
+
+        if self.adaptive_keep:
+            # TODO: the following write is not safe when multiple microbatch
+            self.offloader.engine.adapter.adaptive_kept_layers_beginning_is_passed = (
+                False
+            )
 
         self.lock = threading.Lock()
         self.reevaluator_lock = threading.Lock()
@@ -615,6 +633,10 @@ class TensorCache:
             )
         )
 
+    def wait_and_clear_queues(self):
+        self.offloader.wait_for_storing_queue()
+        self.offloader.wait_for_loading_queue()
+
     def wait_backward(self):
         # Print the full scope tree
         if self.current_forward_iter == 0:
@@ -698,7 +720,7 @@ class TensorCache:
 
                             logger.critical(
                                 "Reading kvikio profiling"
-                                f" {id(adapter)} {len(adapter.start_timestamp)} {len(adapter.end_timestamp)}"
+                                f" {id(adapter)} {len(adapter.start_timestamp)} {len(adapter.end_timestamp)} {adapter.start_timestamp} {adapter.end_timestamp}"
                             )
                             IO_time.append(
                                 1000
@@ -781,7 +803,8 @@ class TensorCache:
                 if isinstance(adapter, KvikioIOAdapter) and (
                     not adapter.is_async
                 ):
-                    adapter.is_being_profiled = True
+                    with adapter.lock:
+                        adapter.is_being_profiled = True
                     print(f"Setting is_being_profiled to True {id(adapter)}")
         if (
             self.adaptive_keep
@@ -797,7 +820,8 @@ class TensorCache:
                 if isinstance(adapter, KvikioIOAdapter) and (
                     not adapter.is_async
                 ):
-                    adapter.is_being_profiled = False
+                    with adapter.lock:
+                        adapter.is_being_profiled = False
 
         if (
             self.adaptive_keep
@@ -1521,6 +1545,10 @@ class TensorCache:
                         == self.adaptive_kept_layers_beginning
                     ):
                         self.adaptive_kept_layers_beginning_is_passed = True
+                        # TODO: the following write is not safe when multiple microbatch
+                        self.offloader.engine.adapter.adaptive_kept_layers_beginning_is_passed = (
+                            True
+                        )
                     if self.current_activation_context is not None:
                         current_activation_context_ = SavedActivationContext(
                             seq_id=self.activation_checkpoints_seqid[
@@ -1532,6 +1560,10 @@ class TensorCache:
                             == self.adaptive_kept_layers_beginning
                         ):
                             self.adaptive_kept_layers_beginning_is_passed = (
+                                True
+                            )
+                            # TODO: the following write is not safe when multiple microbatch
+                            self.offloader.engine.adapter.adaptive_kept_layers_beginning_is_passed = (
                                 True
                             )
 
