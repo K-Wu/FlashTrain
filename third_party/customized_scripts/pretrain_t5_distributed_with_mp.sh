@@ -31,11 +31,11 @@ CHECKPOINT_PATH=./tmp
 VOCAB_FILE=$HOME/.cache/my_huggingface_datasets/bert-base-uncased-vocab.txt
 DATA_PATH="$HOME/.cache/my_huggingface_datasets/meg-bert_text_document"
 
-T5_ARGS=""
+T5_ARGS="${TC_LOGGING_LEVEL}"
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+  T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used"
 elif [ "${USE_TENSOR_CACHE}" = "memory" ]; then
-  T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
+  T5_ARGS="${T5_ARGS} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]

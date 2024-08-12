@@ -179,6 +179,29 @@ def get_output_name(args: argparse.Namespace) -> str:
         return os.path.join(args.output_path, result)
 
 
+def get_shortname_to_hyperparam_name() -> dict[str, str]:
+    args = get_default_args()
+    key_values = dict()
+    for k, v in vars(args).items():
+        if k == "output_path":
+            continue
+        # Normalize the keyword by extracting the first letter of each word
+        key_values["".join([x[0] for x in k.split("_")]).upper()] = k
+    return key_values
+
+
+def extract_runner_args_from_filename(log_file: str) -> dict[str, str]:
+    filename = os.path.basename(log_file)[:-4]
+    key_val_pairs = filename.split("_")
+    shortname_to_hyperparam_name = get_shortname_to_hyperparam_name()
+    hyperparameters = {}
+    for key_val in key_val_pairs:
+        # print(key_val, flush=True)
+        key, val = key_val.split(".")
+        hyperparameters[shortname_to_hyperparam_name[key]] = val
+    return hyperparameters
+
+
 def execute_with(args: argparse.Namespace):
     # Source script to pass arguments, environment variables and start the pretraining
     # TODO: add knob to enable/disable PYTORCH_CUDA_ALLOC_CONF

@@ -60,11 +60,11 @@ WEIGHT_DECAY=0.1
 GRAD_CLIP=1.0
 
 
-llama_args=""
+llama_args="${TC_LOGGING_LEVEL}"
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used"
 elif [ "${USE_TENSOR_CACHE}" = "memory" ]; then
-  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
+  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]

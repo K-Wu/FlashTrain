@@ -76,7 +76,7 @@ HIDDEN_SIZE=${HIDDEN_SIZE:-12288}
 NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-96}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
-USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
+USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-memory}"
 GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
 TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
@@ -117,13 +117,13 @@ EOT
 fi
 
 
-BERT_ARGS=""
+BERT_ARGS="${TC_LOGGING_LEVEL}"
 #  --tensor-cache-log-level CRITICAL
 # --tensor-cache-in-memory-adapter 
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used"
+  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used"
 elif [ "${USE_TENSOR_CACHE}" = "memory" ]; then
-  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-log-level ${TC_LOGGING_LEVEL} --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
+  BERT_ARGS="${BERT_ARGS} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
