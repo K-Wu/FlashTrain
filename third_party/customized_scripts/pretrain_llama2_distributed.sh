@@ -34,14 +34,14 @@ NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 
-NUM_LAYERS=${NUM_LAYERS:-4}
-HIDDEN_SIZE=${HIDDEN_SIZE:-8192}
+NUM_LAYERS=${NUM_LAYERS:-3}
+HIDDEN_SIZE=${HIDDEN_SIZE:-12288}
 NUM_ATTN_HEADS=${NUM_ATTN_HEADS:-64}
 SEQ_LENGTH=${SEQ_LENGTH:-1024}
 ACTIVATION_CHECKPOINT="${ACTIVATION_CHECKPOINT:-false}" # selective, full, false
 USE_TENSOR_CACHE="${USE_TENSOR_CACHE:-true}"
-GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-8}
-MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-8}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
 TC_LOGGING_LEVEL="${TC_LOGGING_LEVEL:-CRITICAL}"
 NUM_KV_HEADS=8
 DISABLE_ADAPTIVE_KEEP="${DISABLE_ADAPTIVE_KEEP:-false}"
@@ -60,11 +60,11 @@ WEIGHT_DECAY=0.1
 GRAD_CLIP=1.0
 
 
-llama_args="${TC_LOGGING_LEVEL}"
+llama_args=" --tensor-cache-log-level ${TC_LOGGING_LEVEL}"
 if [ "${USE_TENSOR_CACHE}" = "true" ]; then
-  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used"
+  llama_args="${llama_args} --enable-tensor-cache --cufile-malloc-hook-is-used"
 elif [ "${USE_TENSOR_CACHE}" = "memory" ]; then
-  llama_args="${llama_args} --enable-tensor-cache --tensor-cache-log-level --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
+  llama_args="${llama_args} --enable-tensor-cache --cufile-malloc-hook-is-used --tensor-cache-in-memory-adapter"
 fi
 
 if [ "${ACTIVATION_CHECKPOINT}" = "selective" ]
@@ -150,6 +150,7 @@ torchrun $DISTRIBUTED_ARGS \
        --optimizer sgd \
        --lossy-offload-first-iter \
        --fp16-lm-cross-entropy \
+       --no-bias-gelu-fusion \
        --use-pure-low-precision \
        --use-flash-attn-v2 \
        --tensor-model-parallel-size $TP \
