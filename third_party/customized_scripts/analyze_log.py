@@ -239,6 +239,7 @@ def convert_slices_of_tables_to_csv(
     """Returns a list of tables of rows of cells representing the CSV format."""
     csv_slices: list[list[list[Any]]] = []
     for slice_key in slices:
+        print("Slice key: ", slice_key, flush=True)
         csv_table = convert_table_to_csv(
             slices[slice_key], ".".join(slice_key)
         )
@@ -250,7 +251,7 @@ def flatten_csvs_to_csv(csvs: list[list[list[Any]]]) -> list[list[Any]]:
     """Flatten a list of tables of rows of cells to a table of rows of cells."""
     csv: list[list[Any]] = []
     for csv_table in csvs:
-        csv.extend(csv_table)
+        csv += csv_table
         csv.append([])
     return csv
 
@@ -287,9 +288,7 @@ def analyze_all_logs_in_queried_directory() -> dict[str, tuple[dict, dict]]:
     return analyze_all_logs_in_directory(path_name)
 
 
-if __name__ == "__main__":
-    # Change working directory to the directory of this script
-    os.chdir(os.path.dirname(os.path.realpath(__file__)))
+def test_this_script():
     print(
         configure_and_run.extract_runner_args_from_filename(
             "/home/kunwu2/FlashTrain/third_party/customized_scripts/M.bert_UTC.false_AC.false_TLL.CRITICAL_HS.8192_SL.1024_NAH.0_NL.4_MBS.8_GBS.8.log"
@@ -318,6 +317,25 @@ if __name__ == "__main__":
         canonicalize_table, ["model", "hidden_size"]
     )
     csv_slices = convert_slices_of_tables_to_csv(slices)
+    csv = flatten_csvs_to_csv(csv_slices)
+    write_csv_to_file(csv, "results.csv")
+
+    table = get_hyperparameters_table(logfile_summary)
+    csv_table = convert_table_to_csv(table, "hyperparameters")
+    write_csv_to_file(csv_table, "hyperparameters.csv")
+
+
+if __name__ == "__main__":
+    # Change working directory to the directory of this script
+    os.chdir(os.path.dirname(os.path.realpath(__file__)))
+    logfile_summary = analyze_all_logs_in_queried_directory()
+
+    canonicalize_table = get_canonicalize_table(logfile_summary)
+    slices = get_slices_of_table_from_canonicalize_table(
+        canonicalize_table, ["model", "hidden_size"]
+    )
+    csv_slices = convert_slices_of_tables_to_csv(slices)
+    # print(csv_slices)
     csv = flatten_csvs_to_csv(csv_slices)
     write_csv_to_file(csv, "results.csv")
 
