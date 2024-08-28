@@ -11,12 +11,20 @@ while true; do
         echo "Please enter y or n"
     fi
 done
-sudo umount /mnt/md2
-sudo mdadm --stop /dev/md2
-# sudo mdadm --remove /dev/md2
-sudo mdadm --zero-superblock /dev/nvme8n2 /dev/nvme17n2 /dev/nvme18n2 /dev/nvme19n2 /dev/nvme20n2 /dev/nvme21n2 /dev/nvme22n2
-sudo umount /mnt/md3
-sudo mdadm --stop /dev/md3
-# sudo mdadm --remove /dev/md3
-sudo mdadm --zero-superblock /dev/nvme8n3 /dev/nvme17n3 /dev/nvme18n3 /dev/nvme19n3 /dev/nvme20n3 /dev/nvme21n3 /dev/nvme22n3
+# sudo umount /mnt/md2
+# sudo mdadm --stop /dev/md2
+# sudo mdadm --zero-superblock /dev/nvme8n2 /dev/nvme17n2 /dev/nvme18n2 /dev/nvme19n2 /dev/nvme20n2 /dev/nvme21n2 /dev/nvme22n2
+# sudo umount /mnt/md3
+# sudo mdadm --stop /dev/md3
+# sudo mdadm --zero-superblock /dev/nvme8n3 /dev/nvme17n3 /dev/nvme18n3 /dev/nvme19n3 /dev/nvme20n3 /dev/nvme21n3 /dev/nvme22n3
+# cat /proc/mdstat
+
+
+
+sudo umount /mnt/md4
+sudo mdadm --stop /dev/md4
+sudo mdadm --zero-superblock /dev/nvme20n2 /dev/nvme21n2 /dev/nvme22n2
+sudo umount /mnt/md5
+sudo mdadm --stop /dev/md5
+sudo mdadm --zero-superblock /dev/nvme8n3 /dev/nvme17n3 /dev/nvme18n3 /dev/nvme19n3
 cat /proc/mdstat

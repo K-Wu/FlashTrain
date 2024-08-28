@@ -195,6 +195,8 @@ class TensorCache:
 
     # Measured GPU memory usage by activation
     measured_activation_gpu_memory_size: int
+    measured_activation_gpu_memory_size_per_tensor: dict[TensorEqID, int]
+    measured_activation_gpu_deduplicated_memory_size: int
 
     # We filter parameters out in this cache/SSD IO because they will stay in memory always.
     parameters_and_inputs: set[TensorEqID]
@@ -350,7 +352,10 @@ class TensorCache:
         forward_compute_time = np.mean(
             self.adaptive_keep_modules_data["all"]["historical_compute_time"]
         )
-        bandwidth = self.measured_activation_gpu_memory_size / forward_IO_time
+        bandwidth = (
+            self.measured_activation_gpu_deduplicated_memory_size
+            / forward_IO_time
+        )
         if self.adaptive_keep_write_bandwidth_overwrite is not None:
             bandwidth = self.adaptive_keep_write_bandwidth_overwrite
         logger.critical(f"Bandwidth: {bandwidth}")
@@ -499,6 +504,8 @@ class TensorCache:
         self.adaptive_kept_layers_beginning_is_passed = False
 
         self.measured_activation_gpu_memory_size = 0
+        self.measured_activation_gpu_memory_size_per_tensor = {}
+        self.measured_activation_gpu_deduplicated_memory_size = 0
 
         ##
         ## Dynamic / Change with new (micro-)batches
@@ -1721,6 +1728,16 @@ class TensorCache:
             ):
                 tensor_size = math.prod(tensor.size()) * tensor.element_size()
                 self.measured_activation_gpu_memory_size += tensor_size
+                if (
+                    tensor_id
+                    not in self.measured_activation_gpu_memory_size_per_tensor
+                ):
+                    self.measured_activation_gpu_memory_size_per_tensor[
+                        tensor_id
+                    ] = tensor_size
+                    self.measured_activation_gpu_deduplicated_memory_size += (
+                        tensor_size
+                    )
 
             # Skip cpu tensors, especially zero tensor in activation recomputing region, e.g., 0_torch.float32_0_1_cpu
             if tensor.device.type == "cpu":
