@@ -28,7 +28,14 @@ HOSTNAMES_TO_CONFIGS = {
                         "path": "/mnt/md5/kunwu2/FlashTrain_temp/",
                         "is_async": False,
                     },
-                )
+                ),
+                # (
+                #     KvikioIOAdapter,
+                #     {
+                #         "path": "/mnt/md6/kunwu2/FlashTrain_temp/",
+                #         "is_async": False,
+                #     },
+                # )
             ],  # Rank 0
             [
                 # (
@@ -44,7 +51,14 @@ HOSTNAMES_TO_CONFIGS = {
                         "path": "/mnt/md4/kunwu2/FlashTrain_temp/",
                         "is_async": False,
                     },
-                )
+                ),
+                # (
+                #     KvikioIOAdapter,
+                #     {
+                #         "path": "/mnt/md7/kunwu2/FlashTrain_temp/",
+                #         "is_async": False,
+                #     },
+                # )
             ],  # Rank 1
         ],
     },
@@ -96,7 +110,7 @@ def get_adapter():
         )
 
     num_kvikio_threads = sum(
-        [3 for c in class_and_kwargs if c[0] == KvikioIOAdapter]
+        [8 for c in class_and_kwargs if c[0] == KvikioIOAdapter]
     )
     if num_kvikio_threads > 0:
         kvikio.defaults.num_threads_reset(num_kvikio_threads)
@@ -104,5 +118,5 @@ def get_adapter():
             "Setting kvikio threads to"
             f" {num_kvikio_threads} {kvikio.defaults.get_num_threads()}"
         )
-        kvikio.defaults.task_size_reset(67108864 * 8)
+        kvikio.defaults.task_size_reset(67108864)
     return results

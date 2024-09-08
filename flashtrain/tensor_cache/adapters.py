@@ -390,7 +390,7 @@ class KvikioIOAdapter(AdapterBase):
                     # logger.critical(f"num threads kvikio: {kvikio.defaults.get_num_threads()}")
                     # f.write(tensor_cupy, task_size=tensor_cupy.nbytes)
                     future = f.pwrite(
-                        tensor_cupy  # , task_size=tensor_cupy.nbytes
+                        tensor_cupy, task_size=tensor_cupy.nbytes
                     )
                     future.get()
 
@@ -456,7 +456,7 @@ class KvikioIOAdapter(AdapterBase):
                     # f.read(tensor, task_size = tensor.numel() * tensor.element_size())
                     future = f.pread(
                         tensor,
-                        # task_size=tensor.numel() * tensor.element_size(),
+                        task_size=tensor.numel() * tensor.element_size(),
                     )
                     future.get()
         except Exception as e:

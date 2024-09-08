@@ -533,9 +533,9 @@ class OffloadHost:
                 and isinstance(adapter.adapters[0], KvikioIOAdapter)
             ):
                 # max_workers = kvikio.defaults.get_num_threads() * 1.5
-                max_workers = 16
+                max_workers = 12
             else:
-                max_workers = 4
+                max_workers = 6
         logger.critical(f"max_workers is {max_workers}")
         if engine_type == self.EngineType.PROCESS:
             self.engine = ProcessOffloadEngine(
