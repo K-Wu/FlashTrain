@@ -1,1 +1,0 @@
-This directory is from https://github.com/FMInference/FlexGen/ but not used at this moment.
